@@ -1,0 +1,876 @@
+---
+title: "Model without random effects -- Annual"
+author: 
+  - Rastin Matin
+  - Benjamin Christoffersen
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:  
+  html_document:
+    toc: true
+bibliography: refs.bib
+---
+  
+<script>
+  $(document).ready(function(){
+    var hide_divs = $("div.hideable");
+    hide_divs.each(function(){
+      // Wrap content in div
+      $(this).wrapInner( "<div class='hideable_content', style='display: none;'></div>");
+      
+      // Add button
+      $(this).prepend("<button id='toogle'>show</button>");
+    });
+    
+    // Add hideable btn
+    // Put the rest in a div
+    
+    $("div.hideable button#toogle").click(function(){
+      var parent = $(this).parent();
+      var target_div = $(parent).find("div.hideable_content");
+      
+      if(target_div.css("display") == "none"){
+        target_div.show();
+        $(this).text("Hide");
+      } else {
+        target_div.hide();
+        $(this).text("Show");
+      }
+    });
+  });
+</script>
+  
+## Load data
+  
+```{r static_setup, include=FALSE, cache=FALSE}
+# please do not set options here that could change...
+knitr::opts_chunk$set(
+  cache.path = 
+    paste0(file.path("cache", "preliminary-annual"), .Platform$file.sep), 
+  fig.path = 
+    paste0(file.path("fig"  , "preliminary-annual"), .Platform$file.sep))
+```
+
+```{r def_data_files}
+# assign file names
+fs <- list(
+  dat          = file.path("data", "final.RDS"), 
+  regres_funcs = file.path("R", "regres_funcs.R"))
+```
+
+```{r check_rebuild, echo = FALSE, cache = TRUE, cache.extra = tools::md5sum(unlist(fs))}
+# see https://stackoverflow.com/a/52163751/5861244
+knitr::opts_chunk$set(cache.rebuild = TRUE)
+```
+
+```{r setup, include=FALSE, cache=FALSE}
+# please do set options here that could change...
+knitr::opts_chunk$set(
+  echo = TRUE, fig.height = 4, fig.width = 7, dpi = 72, comment = "#R", 
+  error = FALSE)
+options(digits = 4, scipen = 10, width = 90)
+```
+
+Source script with the R functions we need 
+
+<div class="hideable">
+  
+```{r source_r_funcs}
+source(fs$regres_funcs, echo = TRUE, max.deparse.length = 5000)
+source(file.path("R", "get_plot_device.R"), echo = TRUE, 
+       max.deparse.length = 5000)
+source(file.path("R", "get_label.R"), echo = TRUE, 
+       max.deparse.length = 5000)
+source(file.path("R", "concatenate.R"), echo = TRUE, 
+       max.deparse.length = 5000)
+source(file.path("R", "diagnostics.R"), echo = TRUE, 
+       max.deparse.length = 5000)
+
+# change default
+formals(wz)$do_center <- TRUE
+```
+
+</div>
+  
+Load the data
+
+```{r load_dat}
+tmp <- readRDS(fs$dat)
+dat <- tmp$data
+make_ym <- tmp$ym_funcs$make_ym
+make_ym_inv <- tmp$ym_funcs$make_ym_inv
+
+# the branch and commit id the data set was made with 
+tmp$git_info
+rm(tmp)
+```
+
+Show some properties and prepare the data
+
+<div class="hideable">
+
+```{r show_prop}
+# exclude firms before they are first rated or after they stop being rated
+(o <- with(dat, table(
+  y,
+  `before first rating date` = tstart < start_rated_ym, 
+  `after last rating date`   = tstop  > stop_rated_ym,
+  useNA = "ifany")))
+round(prop.table(o, margin = 2:3), 5)
+
+table(dat$y)
+dat <- subset(dat, !is.na(start_rated_ym) & tstart >= start_rated_ym)
+table(dat$y)
+dat <- subset(dat, tstop <= stop_rated_ym) 
+table(dat$y)
+
+# starts and ends dates
+make_ym_inv(min(dat$tstart))
+make_ym_inv(max(dat$tstop))
+
+# tstop of last event
+max_is_ev <- with(subset(dat, y == TRUE), max(tstop))
+make_ym_inv(max(max_is_ev))
+
+# max time between stop time and event. Most happen in the same month of the
+# observations. Thus, we may miss only a few events in the end of the sample
+table(with(subset(dat, y), distress_time - tstop))
+
+# have to deal with recurrent events which are not directly supported by 
+# with the functions we use
+library(data.table)
+dat <- data.table(dat)
+setkey(dat, gvkey, tstart) # sort data
+# assumes that data is sorted
+func <- function(y){
+  y <- cumsum(y)
+  y <- c(0, head(y, -1))
+  c("", paste0(".", letters))[y + 1L]
+}
+func(c(F, F, F, T, F, F, T, F, T)) # example
+dat[, gvkey_unique := paste0(gvkey, func(y)), by = gvkey]
+stopifnot(all(dat[, sum(y) %in% 0:1, by = gvkey_unique]$V1))
+dat <- as.data.frame(dat)
+
+# diff is less than 2 due to macro variables
+start_point <- make_ym(as.Date("1980-01-01"))
+stop_point  <- make_ym(as.Date("2015-01-01"))
+stopifnot(max(dat$tstop - dat$tstart) < 2L)
+dat$gvkey_int <- as.integer(as.factor(dat$gvkey_unique))
+dat_con <- concatenate(
+  y ~ r_wcapq_atq + r_req_atq + r_oiadpq_atq + 
+    r_mv_ltq + r_saleq_atq + r_niq_atq + r_ltq_atq + r_actq_lctq + 
+    
+    sigma + excess_ret + rel_size + dtd + 
+    
+    sic_grp_fine + sic_grp + r1y + log_market_ret + 
+    
+    r_wcapq_nn + r_req_nn + r_oiadpq_nn + r_mv_ltq + r_saleq_nn + r_niq_nn + 
+    r_ltq_nn + r_actq_lctq + 
+    
+    mast_issr_num + ev_type + gvkey + distress_type + conm,
+  tstart = tstart, tstop = tstop, id = gvkey_int, data = dat,
+  max_T = stop_point, by = 12L,
+  start_time = start_point)
+
+#####
+# check those that are "lost"
+local({
+  tmp1 <- data.table(dat_con)
+  # assume that we use calender years as the intervals
+  library(lubridate)
+  tmp1 <- tmp1[
+    , .(year = unique(year(make_ym_inv(tstart))), is_dat_con = TRUE), 
+    by = gvkey]
+  
+  tmp2 <- data.table(dat)
+  tmp2 <- tmp2[
+    tstart >= start_point & tstop <= stop_point][
+    , year := year(make_ym_inv(tstart)), by = gvkey][
+      , .(conm = first(conm), mast_issr_num = first(mast_issr_num), 
+          tstop = max(tstop), tstart = min(tstart), y = any(y), 
+          is_dat = TRUE), 
+      by = .(gvkey, year)][
+        , `:=`(tstart_date = make_ym_inv(tstart), 
+               tstop_date  = make_ym_inv(tstop))]
+  
+  mer <- merge(tmp1, tmp2, by = c("gvkey", "year"), all = TRUE)
+  stopifnot(!anyNA(mer$is_dat))
+  f_out <- file.path("tmp", "exclude-annual.csv")
+  f_in  <- file.path("tmp", "in-annual.csv")
+  cat(mean(is.na(mer$is_dat_con)) * 100, "pct. of the observations are", 
+      "excluded. Examples are written to", sQuote(f_out), "\n")
+  
+  plo_da <- mer[, .(`miss rate` = mean(is.na(is_dat_con))), by = year]
+  with(plo_da, plot(`miss rate` ~ year, type = "h", 
+                    ylim = c(0, max(`miss rate`))))
+  
+  mer <- mer[order(tstart, y)]
+  write.csv(as.data.frame(mer[is.na(is_dat_con)]), f_out)
+  write.csv(as.data.frame(mer[!is.na(is_dat_con)]), f_in)
+})
+
+#####
+# require data is present
+local({
+  o <- sort(sapply(dat_con, function(x) mean(is.na(x))))
+  o[o > 0]
+})
+
+nrow(dat_con)
+dat_con <- dat_con[complete.cases(dat_con[
+  , !colnames(dat_con) %in% c("ev_type", "distress_type", "conm")]), ]
+nrow(dat_con)
+
+#####
+# plot default rate. The figure is slightly misleading due to firms
+# that are censored within a year
+dat_con$d_yr <- format(make_ym_inv(dat_con$tstart), "%Y")
+d_rate <- tapply(dat_con$y, dat_con$d_yr, mean)
+
+# number of observations by date
+plot(
+  d_rate ~ as.integer(names(d_rate)), type = "h", ylab = "Default rate", 
+  xlab = "Year (t, t+1]",
+  ylim = c(0, max(d_rate) * 1.04), yaxs = "i")
+
+n_obs <- tapply(dat_con$y, dat_con$d_yr, length)
+plot(n_obs ~ as.integer(names(n_obs)), type = "h", xlab = "Year (t, t+1]", 
+     ylab = "Size of risk set", ylim = c(0, max(n_obs) * 1.04), yaxs = "i")
+```
+
+</div>
+
+Fit models without splines
+
+<div class="hideable">
+
+```{r load_survival}
+library(survival)
+```
+
+```{r only_linear, cache = 1}
+frm <- y ~ wz(r_wcapq_atq) + wz(r_req_atq) + 
+  wz(r_oiadpq_atq) + wz(r_mv_ltq) + wz(r_saleq_atq) + wz(r_niq_atq) + 
+  wz(r_ltq_atq) + wz(r_actq_lctq) + wz(sigma) + 
+  wz(excess_ret) + wz(rel_size)
+
+# nice string to use for the included variables
+local({
+  vs <- all.vars(frm)
+  vs <- vs[!vs %in% "y"]
+  cat(paste0(" * ", sapply(vs, get_label), collapse = "\n"))
+})
+
+# fit models
+`size denom` <- glm(
+  frm, poisson(), dat_con, offset = log(tstop - tstart))
+summary(`size denom`)
+
+#######
+# the Wald tests, likelihood ratio test, etc. are correct but the
+# log-likelihood is not and thus also the AIC. We need to correct this
+surv_fit <- survreg(
+  update(frm, Surv((tstop - tstart), y) ~ .), dat_con, 
+  dist = "exponential")
+
+all.equal(coef(`size denom`), -coef(surv_fit))
+all.equal(vcov(`size denom`), vcov(surv_fit), tolerance = 1e-5)
+
+logLik(`size denom`) # wrong
+logLik(surv_fit)     # correct -- differs by a constant
+
+# function to correct
+cor_logLike_n_aic <- function(...){
+  o <- t(sapply(list(...), function(fit){
+    stopifnot(
+      inherits(fit, "glm"), fit$family$family == "poisson", 
+      fit$family$link == "log", any(fit$offset != fit$offset[1]), 
+      all(fit$y %in% 0:1))
+    
+    adjust <- - sum(fit$offset[fit$y])
+    ll <- logLik(fit) + adjust
+    aic <- AIC(fit) - 2 * adjust
+    list(logLik = c(ll), df = attr(ll, "df"), AIC = aic)
+  }))
+  
+  row.names(o) <- as.character(match.call()[-1L])
+  o
+}
+cor_logLike_n_aic(`size denom`)
+
+#####
+# change denominator
+frm <- y ~ wz(r_wcapq_nn) + wz(r_req_nn) + 
+  wz(r_oiadpq_nn) + wz(r_mv_ltq) + wz(r_saleq_nn) + wz(r_niq_nn) + 
+  wz(r_ltq_nn) + wz(r_actq_lctq) + wz(sigma) + 
+  wz(excess_ret) + wz(rel_size)
+`new denom` <- glm(
+  frm, poisson(), dat_con, offset = log(tstop - tstart))
+summary(`new denom`)
+
+`add DtD` <- update(`new denom`, . ~ . + wz(dtd))
+summary(`add DtD`)
+
+`add macro` <- update(`add DtD`, . ~ . + log_market_ret + r1y)
+summary(`add macro`)
+
+`simplify mod` <- update(
+  `add macro`, . ~ . - wz(r_req_nn) - wz(r_saleq_nn))
+summary(`simplify mod`)
+
+cor_logLike_n_aic(`size denom`, `new denom`, `add DtD`, `add macro`, `simplify mod`)
+
+f0 <- `simplify mod`
+rm(`size denom`, `new denom`, `add DtD`, `add macro`, `simplify mod`)
+```
+
+</div>
+
+## Variance inflation factor
+
+```{r vif}
+library(car)
+vif(f0)
+```
+
+## Residual diagnostics
+
+Look at martingale residuals versus the linear predictor and the covariates
+
+<div class="hideable">
+
+```{r res_diag, cache = 1, dependson = "only_linear"}
+formals(pear_vs_res)[c("ylim", "type")] <- list(c(-.2, .2), "martingale")
+pear_vs_res(f0)
+
+formals(resid_vs_covar)$type <- "martingale"
+make_resid_vs_covar_plot <- function(fit){
+  formals(resid_vs_covar)$ylim <- c(-.05, .05)
+
+  vars <- attr(terms(fit), "dataClasses")
+  keep <- which(vars %in% "numeric" & names(vars) != "(offset)")
+  vars <- as.list(attr(terms(fit), "variables"))[keep + 1L]
+  
+  for(v in vars)
+    eval(bquote(resid_vs_covar(fit, .(v))))
+}
+make_resid_vs_covar_plot(f0)
+```
+
+</div>
+
+Add splines
+
+<div class="hideable">
+
+```{r splines, cache = 1, dependson = c("winz", "res_diag")}
+s1 <- update(f0, . ~ . + sp_w_c(r_niq_nn, 4L))
+summary(s1)
+cor_logLike_n_aic(f0, s1)
+anova(f0, s1, test = "LRT")
+
+#####
+# check how the estimated spline looks
+plot_sp_w_c(s1, "r_niq_nn")()
+
+# add spline to sigma -- knot is only chosen as a knot closer towards zero 
+# yields a collinear basis function after weighting
+s2 <- update(s1, . ~ . + sp_w_c(sigma, 4L, knots = .04))
+summary(s2)
+cor_logLike_n_aic(f0, s1, s2)
+anova(f0, s1, s2, test = "LRT")
+
+# create plots
+plot_list <- list(plot_sp_w_c(s2, "r_niq_nn"), plot_sp_w_c(s2, "sigma"))
+for(i in plot_list)
+  i()
+
+# check residual plots
+make_resid_vs_covar_plot(s2)
+pear_vs_res(s2)
+
+s0 <- s2
+rm(s1, s2)
+```
+
+</div>
+
+Are the effects similar to the marginal effects?
+
+<div class="hideable">
+
+```{r gam_mod, cache = 1}
+library(mgcv)
+local({
+  . <- function(x){
+    x <- substitute(x)
+    qs <- eval(bquote(quantile(.(x), probs = c(.01, .99))), dat_con)
+    qs <- as.numeric(formatC(qs, format = "g", digits = 4))
+    
+    require(parallel)
+    cl <- makeCluster(4L)
+    on.exit(stopCluster(cl))
+    
+    fit <- eval(bquote(
+      bam(y ~ s(wz(.(x), lb = .(qs[1]), ub = .(qs[2])), k = 30L, bs = "cr"), 
+          poisson(), dat_con, cluster = cl, 
+          offset = log(tstop - tstart))))
+    print(summary(fit))
+    
+    function(){
+      plot(fit, xlab = get_label(deparse(x)))
+      add_hist(eval(bquote(wz(.(x))), dat_con))
+    }
+  }
+  plot_list <- list(.(r_niq_nn), .(sigma))
+  
+  for(i in plot_list)
+      i()
+})
+```
+
+</div>
+
+Check for interactions
+
+<div class="hideable">
+
+```{r check_interact, cache = 1, dependson = c("res_diag", "splines"), fig.height = 8, fig.width = 8}
+#####
+# what do large residuals have in common?
+mr <- local({
+  mm <- predict(s0, type = "terms")
+  mr <- apply(mm, 2, rank)
+  res <- residuals.(s0, type = "martingale")
+  mr <- mr[order(res, decreasing = TRUE), ]
+  mr <- mr / nrow(mr)
+})
+# take most extreme  
+rbind(tail = colMeans(tail(mr, 500)), head = colMeans(head(mr, 500)))
+
+# do plots
+vars <- list(
+  dtd         = list(quote(wz(dtd))),
+  r_req_nn    = list(quote(wz(r_niq_nn))),
+  rel_size    = list(quote(wz(rel_size))),
+  sigma       = list(quote(wz(sigma))),
+  r_ltq_nn    = list(quote(wz(r_ltq_nn))),
+  # due to Lando et al. (2013)
+  actq_lctq   = list(quote(wz(r_actq_lctq))))
+formals(resid_vs_covar_inter)$type <- "martingale"
+for(i in seq_along(vars)){
+  for(j in seq_len(length(vars) - i) + i){
+    cl <- list(
+      quote(resid_vs_covar_inter), quote(s0), vars[[i]][[1]],
+      vars[[j]][[1]], ylim = c(-.05, .05))
+    eval(as.call(cl))
+  }
+}
+```
+
+## Add interactions
+
+Add interactions (especially those similar to @Lando13). Some of these are 
+included as we have them in the monthly model as of this writing
+
+<div class="hideable">
+
+```{r add_inter, cache = 1, dependson = "splines"}
+i1 <- update(s0, . ~ . + wz(r_niq_nn) : wz(dtd)) 
+summary(i1)
+cor_logLike_n_aic(s0, i1)
+anova(s0, i1, test = "LRT")
+
+i2 <- update(i1, . ~ . + wz(r_actq_lctq) : wz(dtd)) 
+summary(i2)
+cor_logLike_n_aic(s0, i1, i2)
+anova(s0, i1, i2, test = "LRT")
+
+i2 <- update(i1, . ~ . + wz(r_actq_lctq) : wz(sigma)) 
+summary(i2)
+cor_logLike_n_aic(s0, i1, i2)
+anova(s0, i1, i2, test = "LRT")
+
+i3 <- update(i2, . ~ . + wz(r_niq_nn) : wz(r_ltq_nn)) 
+summary(i3)
+cor_logLike_n_aic(s0, i1, i2, i3)
+anova(s0, i1, i2, i3, test = "LRT")
+
+# we have done a lot of test so we exclude some
+i0 <- update(i2, . ~ . - wz(r_niq_nn) : wz(dtd))
+cor_logLike_n_aic(s0, i0, i1, i2, i3)
+
+# make plots
+pear_vs_res(i0)
+plot_sp_w_c(i0, "r_niq_nn")()
+plot_sp_w_c(i0, "sigma")()
+
+rm(i1, i2, i3)
+```
+
+</div>
+
+## Influential observations
+
+There are some observations that may need an extra check
+
+<div class="hideable">
+
+```{r needs_extra}
+local({
+  resids <- residuals(i0, "deviance")
+  vs <- c("tstop", "gvkey", "distress_type", all.vars(formula(i0)))
+  
+  cat("Remember the coefficient estimates\n")
+  print(coef(i0))
+  
+  o <- merge(
+    cbind(dat_con[, vs], resids = resids)[abs(resids) > 1, ], 
+    with(dat_con, data.frame(tstop, gvkey, mast_issr_num, conm, 
+                             date = make_ym_inv(tstop))), 
+    by = c("gvkey", "tstop"))
+  
+  # merge with default events in original data
+  o <- merge(
+    o[colnames(o) != "distress_type"], all.x = TRUE, by = "gvkey",
+    with(subset(dat, !is.na(distress_type) & gvkey %in% o$gvkey), 
+         data.frame(
+           def_time = make_ym_inv(distress_time), gvkey, distress_type,
+           def_tstop = make_ym_inv(tstop))))
+  
+  o <- tail(o[order(abs(o$resids), o$conm), ], 20)
+  rownames(o) <- nrow(o):1
+  print(o, digits = 2)
+})
+```
+
+## Drop one statistics
+
+<div class="hideable">
+
+```{r drop_one, cache = 1}
+(dr_i0 <- drop1(i0, test = "LRT"))
+```
+
+Make table with likelihood ratio tests
+
+```{r lrt_test_tbl}
+local({
+  lrt_tb <- dr_i0
+  
+  # change row names
+  nam <- rownames(lrt_tb)
+  nam[1] <- "Full model"
+
+  regexp <- "^(wz\\()([a-zA-Z0-9_]+)(,.+|\\))$"
+  mas <- grepl(regexp, nam, perl = TRUE)
+  nam[mas] <- sapply(gsub(regexp, "\\2", nam[mas], perl = TRUE), get_label)
+  
+  regexp <- "^(sp_w_c\\()([a-zA-Z0-9_]+)(,.+|\\))$"
+  mas <- grepl(regexp, nam, perl = TRUE)
+  nam[mas] <- paste(
+    sapply(gsub(regexp, "\\2", nam[mas], perl = TRUE), get_label), 
+    "(spline term)")
+  
+  regexp <- "^log_market_ret|r1y$"
+  mas <- grepl(regexp, nam, perl = TRUE)
+  nam[mas] <- sapply(nam[mas], get_label)
+  
+  nam[-1] <- paste("%", nam[-1])
+  
+  rownames(lrt_tb) <- nam
+  
+  # pick the columns we need, order, and print before turning to chars
+  lrt_tb <- lrt_tb[, c("AIC", "Df", "LRT", "Pr(>Chi)")]
+  lrt_tb <- lrt_tb[c(1, order(lrt_tb[-1, "AIC"]) + 1L), ]
+  print(lrt_tb)
+  
+  # turn to chars for better format
+  pvals <- lrt_tb[, "Pr(>Chi)"]
+  x <- sprintf("  %0.6f", pvals)
+  x[pvals < 1e-6] <- "< 0.000001"
+  
+  lrt_tb_fn <- cbind(
+    AIC = sprintf("%.2f", lrt_tb$AIC),
+    Df = sprintf("%d", lrt_tb$Df), 
+    `LR-stat` = sprintf("%6.2f", lrt_tb$LRT), 
+    `P-value` = x)
+  
+  lrt_tb_fn[1, -1] <- ""
+  rownames(lrt_tb_fn) <- rownames(lrt_tb)
+  
+  print(lrt_tb_fn, quote = FALSE)
+})
+```
+
+</div>
+
+## In-sample fit
+
+Fit model from  @Duffie09 without the random effect
+
+<div class="hideable">
+
+```{r fit_duf, cache = 1}
+duf <- glm(
+  y ~ wz(dtd) + wz(excess_ret) + r1y + log_market_ret, 
+  poisson(), dat_con, offset = log(tstop - tstart))
+summary(duf)
+
+local({
+  duf_scale <- glm(
+  y ~ wz(dtd, do_scale = TRUE) + wz(excess_ret, do_scale = TRUE) + 
+    scale(r1y) + scale(log_market_ret), poisson(), dat_con, 
+  offset = log(tstop - tstart))
+  summary(duf_scale) # compare w/ table III on page 2103
+})
+```
+
+```{r def_est_haz}
+# y is a `Surv` object
+est_haz <- function(y){
+  stopifnot(inherits(y, "Surv"), attr(y, "type") == "right")
+  n_events <- sum(y[, 2])
+  sum_time <- sum(y[, 1])
+  
+  n_events / sum_time
+}
+
+local({
+  # illustrate that results are correct
+  library(survival)
+  tmp <- survreg(Surv(futime, fustat) ~ 1, ovarian, dist="exponential")
+  stopifnot(all.equal(
+    unname(exp(-tmp$coefficients)), 
+    with(ovarian, est_haz(Surv(futime, fustat)))))
+})
+```
+
+<!--
+  knitr::opts_knit$set(output.dir = ".")
+  knitr::load_cache(
+      "in_sample", 
+      path = paste0(file.path("markdown", "cache", "preliminary-annual"), 
+                    .Platform$file.sep))
+-->
+
+```{r in_sample, cache = 1}
+do_sims <- function(pred_out, tvar, nsim = 100000, spec = 6){
+  library(parallel)
+  cl <- makeCluster(spec)
+  on.exit(stopCluster(cl))
+  clusterSetRNGStream(cl)
+  clusterExport(cl, "est_haz", environment())
+  
+  sims <- parSapply(cl, 1:nsim, function(..., tvar, haz, exp_offset){
+    if(anyNA(haz))
+      stop(sQuote("NA"), " hazards")
+    
+    # draw outcome
+    n <- length(haz)
+    y <- rexp(n, haz)
+    require(survival)
+    out <- Surv(y, rep(1, n))
+    
+    is_censored <- out[, 1] > exp_offset
+    out[is_censored, ] <- 
+      Surv(exp_offset[is_censored], rep(0, sum(is_censored)))
+    
+    sapply(sort(unique(tvar)), function(t.) est_haz(out[tvar == t., ]))
+  }, tvar = tvar, haz = pred_out[, "haz"], 
+  exp_offset = pred_out[, "exp_offset"])
+  
+  qs <- apply(sims, 1, quantile, probs = c(.05, .5, .95))
+  list(lbs = qs[1, ], ubs = qs[3, ], mea = qs[2, ])
+}
+
+do_sims_w_fit <- function(fit, newdata = fit$data, tvar, nsim = 10000, 
+                          spec = 6){
+  pred_out <- pred_func(fit, newdata = newdata)
+  tvar_v <- eval(substitute(tvar), newdata)
+  do_sims(pred_out = pred_out, tvar = tvar_v, nsim = nsim, spec = spec)
+}
+
+pred_func <- function(fit, newdata = fit$data){
+  stopifnot(
+    inherits(fit, "glm"), fit$family$family == "poisson", 
+    fit$family$link == "log", all(fit$y %in% 0:1), 
+    # we make the assumption that the time scale is in years and we use 
+    # yearly data. Thus, the maximal offset should be 0 and some offsets 
+    # should be less than 0
+    isTRUE(all.equal(max(fit$offset), log(12))), any(fit$offset < log(12)))
+  
+  lp <- drop(model.matrix(terms(fit), newdata) %*% fit$coefficients)
+  haz <- exp(lp)
+  # account for censoring. TODO: We may not properly handle the cases where 
+  # `y == 1` now...
+  y <- model.response(model.frame(terms(fit), newdata))
+  exp_offset <- ifelse(y, 12, exp(eval(fit$call$offset, newdata)))
+
+  structure(cbind(haz = haz, exp_offset = exp_offset), lp = lp)
+}
+
+set.seed(85664431)
+i0_sims  <- do_sims_w_fit(fit = i0 , tvar = d_yr)
+f0_sims  <- do_sims_w_fit(fit = f0 , tvar = d_yr)
+duf_sims <- do_sims_w_fit(fit = duf, tvar = d_yr)
+```
+
+```{r plot_in_sample_sims}
+make_sims_plot <- function(y, tvar, sims, data, ylim = NA, at_risk_length){
+  y     <- eval(substitute(y)   , data)
+  tvar  <- eval(substitute(tvar), data)
+  at_risk_length <- eval(substitute(at_risk_length), data)
+  require(survival)
+  y <- Surv(at_risk_length, y)
+  
+  rea <- sapply(sort(unique(tvar)), function(t.) est_haz(y[tvar == t., ]))
+  names(rea) <- sort(unique(tvar))
+  x <- as.integer(names(rea))
+  is_miss <- rea < sims$lbs | rea > sims$ubs
+  
+  par_old <- par(no.readonly = TRUE)
+  on.exit(par(par_old))
+  par(mar = c(5, 4, 1, 1))
+  col <- ifelse(is_miss, "Black", "DarkGray")
+  plot(rea ~ x, pch = 16, ylim = ylim, 
+       col = col, cex = .7, 
+       xlab = "Year", ylab = "predicted/realised distress hazard")
+  
+  arrows(x, sims$lbs, x, sims$ubs, length = 0.05, angle = 90, 
+         code = 3, col = col)
+  points(x, sims$mea, col = col, pch = 4)
+  
+  # diff plot
+  plot(rea - sims$mea ~ x,  
+       col = ifelse(is_miss, "Black", "DarkGray"), cex = .7, 
+       xlab = "Year", ylab = "Difference from realised distress hazard", 
+       type = "h", ylim = c(-diff(ylim) * .4, diff(ylim) * .5))
+}
+
+par(mfcol = c(1, 2))
+make_sims_plot(
+  y, d_yr, i0_sims , dat_con, c(0, .006), at_risk_length = (tstop - tstart))
+make_sims_plot(
+  y, d_yr, f0_sims , dat_con, c(0, .006), at_risk_length = (tstop - tstart))
+make_sims_plot(
+  y, d_yr, duf_sims, dat_con, c(0, .006), at_risk_length = (tstop - tstart))
+```
+
+In-sample concordance
+
+```{r auc_in_sample}
+with(dat_con, survConcordance(
+  Surv(tstop - tstart, y) ~ attr(pred_func(i0 ), "lp")))
+with(dat_con, survConcordance(
+  Surv(tstop - tstart, y) ~ attr(pred_func(f0 ), "lp")))
+with(dat_con, survConcordance(
+  Surv(tstop - tstart, y) ~ attr(pred_func(duf), "lp")))
+```
+
+</div>
+
+## Out-sample fit
+
+<div class="hideable">
+
+<!-- 
+  knitr::opts_knit$set(output.dir = ".")
+  knitr::load_cache(
+      "fit_out_sample", 
+      path = paste0(file.path("markdown", "cache", "preliminary-annual"), 
+                    .Platform$file.sep))
+--> 
+
+```{r fit_out_sample, cache = 1, dependson = c("fit_duf", "splines")}
+dat_con$d_yr_int <- as.integer(dat_con$d_yr)
+
+yrs <- 1999:max(as.integer(dat_con$d_yr_int))
+out <- cbind(
+  dat_con[, c("y", "d_yr_int", "gvkey")], exp_offset = NA_real_,
+  f0_haz = NA_real_ , i0_haz = NA_real_, duf_haz = NA_real_)
+
+frms <- list(f = formula(f0), s = formula(i0), d = formula(duf))
+
+out_sample_res <- lapply(yrs, function(yr){
+  cat("Running", sQuote(yr), "\n")
+  
+  d_sub <- subset(dat_con, d_yr_int < yr)
+  fits <- NULL
+  for(f in frms)
+    fits <- c(fits, list(glm(
+      f, family = poisson(), data = d_sub, 
+      offset = log(tstop - tstart))))
+  names(fits) <- names(frms)
+  
+  idx <- dat_con$d_yr_int == yr
+  d_pred <- dat_con[idx, ]
+  preds <- lapply(fits, pred_func, newdata = d_pred)
+  
+  res <- sapply(preds, function(x)
+    with(d_pred, unname(survConcordance(Surv(
+         tstop - tstart, y) ~ attr(x, "lp"))$concordance)))
+
+  out[idx, c("f0_haz", "exp_offset")] <<- preds$f
+  out[idx, "i0_haz"] <<-  preds$s[, "haz"]
+  out[idx, "duf_haz"] <<- preds$d[, "haz"]
+  
+  list(res = res, coefs = lapply(fits, function(x) summary(x)$coefficients))
+})
+```
+
+```{r plot_out_sample_metrics}
+metrics <- do.call(cbind, lapply(out_sample_res, "[[", "res"))
+metrics <- metrics[c("f", "s", "d"), ]
+
+matplot(
+  yrs, t(metrics), type = "p", pch = 16:18, 
+  ylab = "Out-of-sample concordance", xlab = "Year")
+```
+
+<!-- 
+  knitr::opts_knit$set(output.dir = ".")
+  knitr::load_cache(
+      "sim_out_sample", 
+      path = paste0(file.path("markdown", "cache", "preliminary-annual"), 
+                    .Platform$file.sep))
+--> 
+
+```{r sim_out_sample, cache=1, dependson= c("in_sample", "fit_out_sample")}
+min_yr <- min(yrs) 
+stopifnot(
+  all(is.na(subset(out, d_yr_int < min_yr, 
+                   c("f0_haz", "i0_haz", "duf_haz")))),
+  !anyNA(subset(out, d_yr_int >= min_yr, 
+                c("f0_haz", "i0_haz", "duf_haz"))))
+
+out <- subset(out, d_yr_int >= min_yr)
+set.seed(85664431)
+
+out <- out[complete.cases(out), ]
+x <- out[, c("i0_haz", "exp_offset")]
+colnames(x)[1] <- "haz"
+i0_sims_out  <- do_sims(pred_out = x, tvar = out$d_yr_int)
+
+x <- out[, c("f0_haz", "exp_offset")]
+colnames(x)[1] <- "haz"
+f0_sims_out  <- do_sims(pred_out = x , tvar = out$d_yr_int)
+
+x <- out[, c("duf_haz", "exp_offset")]
+colnames(x)[1] <- "haz"
+duf_sims_out <- do_sims(pred_out = x, tvar = out$d_yr_int)
+``` 
+
+```{r plot_out_sample_sims}
+par(mfcol = c(1, 2))
+make_sims_plot(y, d_yr_int, i0_sims_out , out, c(0, .006), 
+               at_risk_length = exp_offset)
+make_sims_plot(y, d_yr_int, f0_sims_out , out, c(0, .006), 
+               at_risk_length = exp_offset)
+make_sims_plot(y, d_yr_int, duf_sims_out, out, c(0, .006), 
+               at_risk_length = exp_offset)
+```
+
+</div>
+
+# References

@@ -1,0 +1,1351 @@
+---
+title: "Model with random effects -- Annual"
+author: 
+  - Rastin Matin
+  - Benjamin Christoffersen
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:  
+  html_document:
+    toc: true
+bibliography: refs.bib
+---
+  
+<script>
+  $(document).ready(function(){
+    var hide_divs = $("div.hideable");
+    hide_divs.each(function(){
+      // Wrap content in div
+      $(this).wrapInner( "<div class='hideable_content', style='display: none;'></div>");
+      
+      // Add button
+      $(this).prepend("<button id='toogle'>show</button>");
+    });
+    
+    // Add hideable btn
+    // Put the rest in a div
+    
+    $("div.hideable button#toogle").click(function(){
+      var parent = $(this).parent();
+      var target_div = $(parent).find("div.hideable_content");
+      
+      if(target_div.css("display") == "none"){
+        target_div.show();
+        $(this).text("Hide");
+      } else {
+        target_div.hide();
+        $(this).text("Show");
+      }
+    });
+  });
+</script>
+  
+## Load data
+  
+```{r static_setup, include=FALSE, cache=FALSE}
+# please do not set options here that could change...
+knitr::opts_chunk$set(
+  cache.path = 
+    paste0(file.path("cache", "rng-effects-annual"), .Platform$file.sep), 
+  fig.path = 
+    paste0(file.path("fig"  , "rng-effects-annual"), .Platform$file.sep))
+```
+
+```{r def_data_files}
+# assign file names
+fs <- list(
+  dat          = file.path("data", "final.RDS"), 
+  regres_funcs = file.path("R", "regres_funcs.R"))
+```
+
+```{r check_rebuild, echo = FALSE, cache = TRUE, cache.extra = tools::md5sum(unlist(fs))}
+# see https://stackoverflow.com/a/52163751/5861244
+knitr::opts_chunk$set(cache.rebuild = TRUE)
+```
+
+```{r setup, include=FALSE, cache=FALSE}
+# please do set options here that could change...
+knitr::opts_chunk$set(
+  echo = TRUE, fig.height = 4, fig.width = 7, dpi = 128, comment = "#R", 
+  error = FALSE)
+options(digits = 4, scipen = 10, width = 90)
+```
+
+Source scripts with the R functions we need 
+
+<div class="hideable">
+  
+```{r source_r_funcs}
+source(fs$regres_funcs, echo = TRUE, max.deparse.length = 5000)
+source(file.path("R", "get_plot_device.R"), echo = TRUE, 
+       max.deparse.length = 5000)
+source(file.path("R", "get_label.R"), echo = TRUE, 
+       max.deparse.length = 5000)
+source(file.path("R", "concatenate.R"), echo = TRUE, 
+       max.deparse.length = 5000)
+source(file.path("R", "cycles.R"), echo = TRUE, 
+       max.deparse.length = 5000)
+
+# change default. It decreases the computation time
+formals(wz)$do_center <- TRUE
+```
+
+</div>
+  
+Load the data
+
+```{r load_dat}
+tmp <- readRDS(fs$dat)
+dat <- tmp$data
+make_ym <- tmp$ym_funcs$make_ym
+make_ym_inv <- tmp$ym_funcs$make_ym_inv
+
+# the branch and commit id the data set was made with 
+tmp$git_info
+rm(tmp)
+```
+
+Show some properties and prepare the data
+
+<div class="hideable">
+
+```{r show_prop}
+# exclude firms before they are first rated or after they stop being rated
+(o <- with(dat, table(
+  y,
+  `before first rating date` = tstart < start_rated_ym, 
+  `after last rating date`   = tstop  > stop_rated_ym,
+  useNA = "ifany")))
+round(prop.table(o, margin = 2:3), 5)
+
+table(dat$y)
+dat <- subset(dat, !is.na(start_rated_ym) & tstart >= start_rated_ym)
+table(dat$y)
+dat <- subset(dat, tstop <= stop_rated_ym) 
+table(dat$y)
+
+# starts and ends dates
+make_ym_inv(min(dat$tstart))
+make_ym_inv(max(dat$tstop))
+
+# tstop of last event
+max_is_ev <- with(subset(dat, y == TRUE), max(tstop))
+make_ym_inv(max(max_is_ev))
+
+# max time between stop time and event. Most happen in the same month of the
+# observations. Thus, we may miss only a few events in the end of the sample
+table(with(subset(dat, y), distress_time - tstop))
+
+# have to deal with recurrent events which are not directly supported by 
+# with the functions we use
+library(data.table)
+dat <- data.table(dat)
+setkey(dat, gvkey, tstart) # sort data
+# assumes that data is sorted
+func <- function(y){
+  y <- cumsum(y)
+  y <- c(0, head(y, -1))
+  c("", paste0(".", letters))[y + 1L]
+}
+func(c(F, F, F, T, F, F, T, F, T)) # example
+dat[, gvkey_unique := paste0(gvkey, func(y)), by = gvkey]
+stopifnot(all(dat[, sum(y) %in% 0:1, by = gvkey_unique]$V1))
+dat <- as.data.frame(dat)
+
+# diff is less than 2 due to macro variables
+start_point <- make_ym(as.Date("1980-10-01"))
+stop_point  <- make_ym(as.Date("2016-10-01"))
+stopifnot(max(dat$tstop - dat$tstart) < 2L)
+dat$gvkey_int <- as.integer(as.factor(dat$gvkey_unique))
+dat_con <- concatenate(
+  y ~ r_wcapq_atq + r_req_atq + r_oiadpq_atq + 
+    r_mv_ltq + r_saleq_atq + r_niq_atq + r_ltq_atq + r_actq_lctq + 
+    
+    sigma + excess_ret + rel_size + dtd + 
+    
+    sic_grp_fine + sic_grp + r1y + log_market_ret + 
+    
+    r_wcapq_nn + r_req_nn + r_oiadpq_nn + r_mv_ltq + r_saleq_nn + r_niq_nn + 
+    r_ltq_nn + r_actq_lctq + 
+    
+    mast_issr_num + ev_type + gvkey + distress_type + conm,
+  tstart = tstart, tstop = tstop, id = gvkey_int, data = dat,
+  max_T = stop_point, by = 12L,
+  start_time = start_point)
+
+#####
+# require data is present
+local({
+  o <- sort(sapply(dat_con, function(x) mean(is.na(x))))
+  o[o > 0]
+})
+
+nrow(dat_con)
+dat_con <- dat_con[complete.cases(dat_con[
+  , !colnames(dat_con) %in% c("ev_type", "distress_type", "conm")]), ]
+nrow(dat_con)
+
+#####
+# plot default rate. Slightly misleading as it does not account for time
+# at risk
+dat_con$d_yr <- format(make_ym_inv(dat_con$tstart), "%Y")
+d_rate <- tapply(dat_con$y, dat_con$d_yr, mean)
+
+# number of observations by date
+plot(
+  d_rate ~ as.integer(names(d_rate)), type = "h", ylab = "Default rate", 
+  xlab = "Year (t, t+1]",
+  ylim = c(0, max(d_rate) * 1.04), yaxs = "i")
+
+n_obs <- tapply(dat_con$y, dat_con$d_yr, length)
+plot(n_obs ~ as.integer(names(n_obs)), type = "h", xlab = "Year (t, t+1]", 
+     ylab = "Size of risk set", ylim = c(0, max(n_obs) * 1.04), yaxs = "i")
+```
+
+## Model without random effects
+
+Fit model without random effects
+
+<div class="hideable">
+
+```{r ass_frm_dd, cache = 1}
+frm <- y ~ wz(r_wcapq_nn) + wz(r_oiadpq_nn) + wz(r_mv_ltq) + wz(r_niq_nn) + 
+  wz(r_ltq_nn) + wz(r_actq_lctq) + wz(sigma) + wz(excess_ret) + 
+  wz(rel_size) + wz(dtd) + log_market_ret + r1y + sp_w_c(r_niq_nn, 4) +
+  # knot is only chosen as a knot closer towards zero 
+  # yields a collinear basis function after weighting
+  sp_w_c(sigma, 4, knots = .04) + wz(r_actq_lctq):wz(sigma)
+```
+
+```{r fit_no_rng}
+# fit model without random effects
+base_fit <- glm(frm, poisson(), dat_con, offset = log(tstop - tstart))
+summary(base_fit)
+
+# the estimate and Wald test are correct but we need to adjust the 
+# log-likelihood
+library(survival)
+ss_fit <- survreg(update(frm, Surv((tstop - tstart), y) ~ .), 
+                  dat_con, dist = "exponential")
+logLik(ss_fit)   # correct
+logLik(base_fit) # wrong
+# corrected 
+logLik(base_fit) - with(subset(dat_con, y), sum(log(tstop - tstart))) 
+```
+
+</div>
+
+Fit models with time fixed effects and interactions to show variation 
+through time
+
+<div class="hideable">
+
+```{r check_time_var_rel_size, cache = 1}
+# make breaks
+n_brs <- 8L
+brs_x <- as.integer(dat_con$d_yr)
+brs <- seq(min(brs_x), max(brs_x), length.out = n_brs)
+brs <- as.integer(brs)
+brs[n_brs] <- max(brs_x)
+brs[1] <- brs[1] - 1L
+
+# make dummies
+labs <- paste0("(", brs[-n_brs], ", " , brs[-1], "]")
+
+dat_con$year_dummy <- cut(brs_x, breaks = brs, labels = labs)
+stopifnot(!anyNA(dat_con$year_dummy))
+table(dat_con$year_dummy, dat_con$y)
+
+# run regression
+local({
+  t0 <- update(base_fit, . ~ . + year_dummy - 1)
+  print(summary(t0))
+  
+  t1 <- update(
+    t0, . ~ . - wz(rel_size) + wz(rel_size):year_dummy)
+  print(summary(t1))
+  
+  t2 <- update(
+    t1, . ~ . - wz(r_niq_nn) + wz(r_niq_nn):year_dummy)
+  print(summary(t2))
+  
+  # industry effects
+  t3 <- update(t2, . ~ . + sic_grp:year_dummy)
+  print(summary(t3))
+  
+  anova(base_fit, t0, t1, t2, t3, test = "LRT")
+})
+```
+
+</div>
+
+```{r check_rebuild_extra, include = FALSE}
+if(!interactive()){
+  .check_before_merge <- file.path("markdown", "cache", "rng_check-annual")
+  if(!file.exists(.check_before_merge)){
+    knitr::opts_chunk$set(cache.rebuild = TRUE)
+  } else
+    knitr::opts_chunk$set(
+      cache.rebuild = knitr::opts_chunk$get("cache.rebuild") ||
+        !readRDS(.check_before_merge) == digest::digest(dat))
+  
+  saveRDS(digest::digest(dat), .check_before_merge)
+}
+```
+
+## Random effect models
+
+### Model with random intercept
+
+Fit model
+
+<div class="hideable">
+
+```{r load_dynamhaz}
+library(dynamichazard)
+```
+
+```{r set_n_threads}
+# set number of threads
+n_threads <- 6L
+```
+
+```{r assign_log_n_eval}
+# function to sink output to log file
+log_n_eval <- function(expr, log_prefix){
+  # setup directories and files to keep track of output
+  f_name <- paste0(
+    "rng-effects-annual", log_prefix, "_", format(Sys.Date()))
+  f_dir <- file.path("markdown", "logs", paste0(f_name))
+  sink(    file.path("markdown", "logs", paste0(f_name, ".log")))
+  dir.create(tmp_dir <- tempfile())
+  png(file.path(tmp_dir, "Rplot%04d.png"))
+  
+  # clean-up
+  on.exit({
+    sink()
+    dev.off()
+    try({
+      if(!dir.exists(f_dir))
+        dir.create(f_dir)
+      if(length(new_files <- list.files(tmp_dir, full.names = TRUE)) > 0)
+        file.copy(new_files, f_dir, overwrite = TRUE)
+      unlink(tmp_dir, recursive = TRUE)
+    })
+    rm(f_dir, f_name, new_files)
+  })
+  
+  # make call
+  eval(substitute(expr), parent.frame())
+}
+```
+
+```{r dd_fixed, cache = 1, dependson="ass_frm_dd"}
+frm_fixed <- update(frm, Surv(tstart, tstop, y) ~ .)
+```
+
+<!-- 
+  knitr::opts_knit$set(output.dir = ".")
+  knitr::load_cache(
+      "state_full_rng_inter", 
+      path = paste0(file.path("markdown", "cache", "rng-effects-annual"), 
+                    .Platform$file.sep))
+--> 
+
+```{r state_full_rng_inter, cache = 1, dependson="dd_fixed"}
+set.seed(seed <- 72125268)
+log_n_eval({
+  state_rng_inter <- PF_EM(
+    fixed = frm_fixed, random = ~ 1, 
+    data = dat_con, Fmat = diag(.5, 1),
+    model = "exponential", by = 12L, max_T = max(dat_con$tstop), 
+    id = dat_con$gvkey_int, 
+    Q_0 = 2^2, Q = .1^2, type = "VAR", control = PF_control(
+      N_fw_n_bw = 400L, N_smooth = 1000L, N_first = 1000L, n_max = 100L, 
+      n_threads = n_threads, nu = 8L, N_smooth_final = 300L,
+      smoother = "Fearnhead_O_N", eps = 1e-4), 
+    trace = 1L)
+}, "_state_rng_inter")
+```
+
+Take one more iteration with more particles
+
+```{r def_take_xtra, cache = 1}
+take_xtra <- function(
+  fit, n_max = 10L, trace = 0L, N_fw_n_bw, N_smooth, N_first, N_smooth_final){
+  cl <- fit$call
+  ctrl <- cl[["control"]]
+  ctrl[c("N_fw_n_bw", "N_smooth", "N_first", "n_max", "N_smooth_final")] <- 
+    c(N_fw_n_bw, N_smooth, N_first, n_max, N_smooth_final)
+  cl[c("control", "trace")] <- list(ctrl, trace)
+  
+  . <- function(x, y)
+    eval(substitute({
+      if(!is.null(fit$x))  
+        cl$y <<- fit$x
+    }, list(x = substitute(x), 
+            y = if(missing(y)) substitute(x) else substitute(y))))
+  
+  .(a_0)
+  .(fixed_effects)
+  if(is.null(fit$psi)){
+    .(Q)
+    .(F, Fmat)
+    
+  } else {
+    .(phi, phi)
+    .(psi, psi)
+    .(theta, theta)
+    .(G, G)
+    .(J, J)
+    .(K, K) 
+  }
+  
+  cat("Running\n", paste0("  ", deparse(cl), collapse = "\n"), "\n", sep = "")
+  
+  eval(cl)
+}
+```
+
+<!-- 
+  knitr::opts_knit$set(output.dir = ".")
+  knitr::load_cache(
+      "large_state_full_rng_inter", 
+      path = paste0(file.path("markdown", "cache", "rng-effects-annual"), 
+                    .Platform$file.sep))
+--> 
+
+```{r large_state_full_rng_inter, cache = 1, dependson = "state_full_rng_inter"}
+set.seed(seed) 
+state_rng_inter_large <- take_xtra(
+  state_rng_inter, n_max = 1L, 
+  N_fw_n_bw = 5000L, N_smooth = 10000L, N_first = 10000L, 
+  N_smooth_final = 2500L)
+```
+
+</div>
+
+Result is essentially an idd random effect
+
+<div class="hideable">
+
+```{r load_lmer}
+library(lme4)
+```
+
+<!-- 
+  knitr::opts_knit$set(output.dir = ".")
+  knitr::load_cache(
+      "comp_w_glmer_res_state_full_rng_inter", 
+      path = paste0(file.path("markdown", "cache", "rng-effects-annual"), 
+                    .Platform$file.sep))
+--> 
+
+```{r comp_w_glmer_res_state_full_rng_inter, cache = 1}
+state_rng_inter_large$F
+sqrt(state_rng_inter_large$Q)
+logLik(state_rng_inter_large)
+
+# compare with iid random effect model estimated with `lme4`. `nAGQ` defaults
+# to 1 so we use a Laplace approximation
+iid_fit <- glmer(
+  update(frm, y ~ . + (1 | d_yr)), dat_con, poisson(), offset = 
+    log(tstop - tstart), control = glmerControl(
+      calc.derivs = FALSE, optCtrl = list(maxfun = 10000L)))
+pf <- profile(iid_fit, prof.scale = "sdcor", which = ".sig01")
+```
+
+```{r show_comp_w_glmer_res_state_full_rng_inter}
+logLik(iid_fit) - with(subset(dat_con, y), sum(log(tstop - tstart))) 
+# estimated covariance matrix
+VarCorr(iid_fit)
+# profile confidence interval for standard deviation
+confint(pf)
+```
+
+</div>
+
+Show result
+
+<div class="hideable">
+
+```{r show_state_full_rng_inter}
+plot(state_rng_inter$log_likes)
+
+#####
+# plot smoothed random effect
+get_year_vals <- function()
+  sort(unique(as.integer(dat_con$d_yr))) + 1L + 
+      (month(min(make_ym_inv(dat_con$tstart))) - 1L) / 12L
+pf_plot_effects <- function(
+  fit, qlvl = pnorm(-1) * 2, ylabs, type = "smoothed_clouds", x, x_lim, 
+  change_par = TRUE){
+  stopifnot(type %in% c("smoothed_clouds", "forward_clouds"))
+  dp <- if(type != "smoothed_clouds") -1 else TRUE
+  o <- list(
+    mean = get_cloud_means(fit, type = type)[dp, , drop = FALSE],
+    qs = get_cloud_quantiles(fit, qlvls = c(qlvl/2, 1 - qlvl/2), 
+                             type = type)[, , dp, drop = FALSE])
+  cat(sprintf("%.2f pct. confidence intervals\n", (1 - qlvl) * 100))
+  
+  library(lubridate)
+  if(missing(x))
+    x <- get_year_vals()
+      
+  if(missing(x_lim))
+    x_lim <- range(x)
+  stopifnot(nrow(o$mean) == length(x))
+  
+  if(change_par){
+    par_old <- par(no.readonly = TRUE)
+    on.exit(par(par_old))
+    par(mar = c(5, 4, 1, 1))
+  }
+  for(i in 1:ncol(o$mean)){
+    me  <- o$mean[, i]
+    lbs <- o$qs[1, i, ]
+    ubs <- o$qs[2, i, ]
+    plot(o$mean[, i] ~ x, ylim = range(lbs, ubs, me, na.rm = TRUE), 
+         xlab = "Year", ylab = ylabs[i], pch = 16, xlim = x_lim)
+    nber_poly()
+    
+    arrows(x, lbs, x, ubs, length = 0.05, angle = 90, code = 3)
+    abline(h = 0)
+  }
+}
+
+get_plot_device(
+  pf_plot_effects(state_rng_inter_large, ylabs = "Intercept"), 
+  "rng-inter-smooth-state-annual")
+
+#####
+# plot effective sample size
+plot_eff <- function(fit){
+  eff <- fit$effective_sample_size$smoothed_clouds
+  x <- get_year_vals()
+  stopifnot(length(eff) == length(x))
+  
+  plot(eff ~ x, type = "h", xlab = "Year", ylab = "Effective sample size", 
+       ylim = range(eff, 0))
+}
+plot_eff(state_rng_inter)
+plot_eff(state_rng_inter_large)
+```
+
+</div>
+
+### Model with random intercept and relative size slope
+
+Fit model
+
+<div class="hideable">
+
+<!-- 
+  knitr::opts_knit$set(output.dir = ".")
+  knitr::load_cache(
+      "state_full_rng_size_inter", 
+      path = paste0(file.path("markdown", "cache", "rng-effects-annual"), 
+                    .Platform$file.sep))
+--> 
+
+```{r state_full_rng_size_inter, cache = 1, dependson="dd_fixed"}
+set.seed(seed)
+log_n_eval({
+  state_rng_size_inter <- PF_EM(
+    fixed = frm_fixed, random = ~ 1 + wz(rel_size), 
+    data = dat_con, 
+    
+    J = diag(1, 2), psi = log(c(0.36, .05)),
+    G = matrix(c(1, 0, 
+                 0, 0, 
+                 0, 0, 
+                 0, 1), byrow = TRUE, ncol = 2), theta = c(.5, .5), 
+    K = matrix(1, 1, 1), phi = 0,
+    
+    model = "exponential", by = 12L, max_T = max(dat_con$tstop), 
+    id = dat_con$gvkey_int, 
+    Q_0 = diag(1, 2), type = "VAR", control = PF_control(
+      N_fw_n_bw = 400L, N_smooth = 1000L, N_first = 1000L, n_max = 200L, 
+      n_threads = n_threads, nu = 8L, N_smooth_final = 300L,
+      smoother = "Fearnhead_O_N", eps = 1e-4), 
+    trace = 1L)
+}, "_state_rng_size_inter")
+```
+
+Take one more iteration with more particles
+
+<!-- 
+  knitr::opts_knit$set(output.dir = ".")
+  knitr::load_cache(
+      "large_state_full_rng_size_inter", 
+      path = paste0(file.path("markdown", "cache", "rng-effects-annual"), 
+                    .Platform$file.sep))
+--> 
+
+```{r large_state_full_rng_size_inter, cache = 1, dependson = "state_full_rng_size_inter"}
+set.seed(seed) 
+state_rng_size_inter_large <- take_xtra(
+  state_rng_size_inter, n_max = 1L, 
+  N_fw_n_bw = 5000L, N_smooth = 10000L, N_first = 10000L, 
+  N_smooth_final = 2500L)
+```
+
+</div>
+
+Show results
+
+<div class="hideable">
+
+```{r show_state_full_rng_size_inter}
+#####
+# estimates and approximate log-likelihood
+plot(state_rng_size_inter$log_likes)
+plot(tail(state_rng_size_inter$log_likes, 50))
+state_rng_size_inter_large$F
+state_rng_size_inter_large$Q
+
+#####
+# predicted random effects
+get_plot_device(
+  pf_plot_effects(state_rng_size_inter_large, 
+                ylabs = c("Intercept", get_label("rel_size"))), 
+  "rng-inter-smooth-state-w-size-annual", onefile = FALSE)
+
+#####
+# compare models by AIC
+AIC(state_rng_size_inter_large, state_rng_inter_large, ss_fit)
+```
+
+</div>
+
+## Make coefficient tabel
+
+<div class="hideable">
+
+```{r coef_table}
+frm_simple <- y ~ wz(dtd) +  wz(excess_ret) + log_market_ret + r1y
+local({
+  # fit simple model
+  glm_simple <- glm(
+    frm_simple, poisson(), dat_con, offset = log(tstop - tstart))
+  
+  frm_ord <- # we will use this order
+    ~ wz(dtd) + wz(excess_ret) + log_market_ret + r1y + wz(r_wcapq_nn) + 
+    wz(r_oiadpq_nn) + wz(r_mv_ltq) + wz(r_niq_nn) + wz(r_ltq_nn) + 
+    wz(r_actq_lctq) + wz(sigma) + wz(rel_size) + sp_w_c(r_niq_nn, 4) + 
+    sp_w_c(sigma, 4, knots = .04) + wz(r_actq_lctq):wz(sigma)
+  
+  # fit base model with new order  
+  glm_base_new <- update(glm_simple, update(frm_ord, y ~ . ))
+  stopifnot(isTRUE(all.equal(logLik(glm_base_new), logLik(base_fit))))
+  
+  # perform likelihood ratio tests
+  objs_glm <- list(`Simple glm` = glm_simple, `base glm` = glm_base_new)
+  d1 <- lapply(objs_glm, function(x)
+    drop1(x, scope = attr(terms(x), "term.labels"), test = "LRT"))
+  print(d1) # printed to check result
+  objs_ddh <- list(
+    inter = state_rng_inter_large, 
+    `inter & slope` = state_rng_size_inter_large)
+  
+  ##### 
+  # header
+  nm_glm <- length(objs_glm)
+  nm_ddh <- length(objs_ddh)
+  
+  glm_t_arg <- paste(
+    "S[table-format=-2.3 ,table-alignment=right]@{}", 
+    "@{}l", 
+    "S[table-format=2.3,table-space-text-pre={*}, table-space-text-post={-*}]", 
+    sep = "\n")
+  rng_t_arg <- "S[table-format=-1.3,table-space-text-pre={*}]"
+  cmark <- "{\\makecell[r]{\\checkmark}}"
+  
+  cat(
+    "\\begin{tabular}{l\n", 
+    paste(c(rep(glm_t_arg, nm_glm), rep(rng_t_arg, nm_ddh)), collapse = "\n"), 
+    "}\n", sep = "", 
+    "\\toprule\n", 
+    "& ", 
+    paste0("\\multicolumn{3}{c}{(", 
+           tolower(as.roman(1:nm_glm)), ")}",
+           collapse = " & "), " & ",
+    paste0("\\multicolumn{1}{c}{(", 
+           tolower(as.roman(1:nm_ddh + nm_glm)), ")}",
+           collapse = " & "), "\\\\\n",
+    "\\midrule\n")
+  
+  #####
+  # coefficients
+  cos <- names(glm_base_new$coefficients)
+  coefs <- matrix(NA_character_, length(cos), 2L * nm_glm + nm_ddh, 
+                  dimnames = list(cos, NULL))
+  
+  get_pstart <- function(x, p){
+      s <- ifelse(
+        p > .1 | is.na(p), " & ", ifelse(
+          p > .05, " & $^{*}$", ifelse(
+            p > .01, " & $^{**}$", " & $^{***}$")))
+      
+      ifelse(is.na(x), " & ", paste0(x, s))
+  }
+  for(i in seq_along(objs_glm)){
+    # get elements we need
+    m <- objs_glm[[i]]
+    d <- d1[[i]]
+    
+    # figure out which term has multiple columns
+    assg <- attr(model.matrix(terms(m), m$data), "assign") + 1L
+    has_more <- table(assg) > 1L
+    has_more <- assg %in% which(has_more)
+    
+    # find matching index in coefficient table
+    x <- summary(m)$coefficients
+    ma <- match(rownames(x), cos)
+    stopifnot(!anyNA(ma))
+    
+    # find estimate, test statistic, and p-value and insert them
+    z_t <- x[, "z value"]
+    p   <- x[, "Pr(>|z|)"]
+    
+    z_t[has_more] <- d[assg[has_more], "LRT"]
+    p  [has_more] <- d[assg[has_more], "Pr(>Chi)"]
+    
+    z <- x[, "Estimate"]
+    # remove rows with more than one term 
+    z <- ifelse(assg %in% which(table(assg) > 1L), cmark, sprintf("%.3f", z))
+    
+    idx <- (i - 1L) * 2L + 1:2
+    coefs[ma, idx] <- cbind(get_pstart(z, p), sprintf("(%.3f)", z_t))
+    coefs[-ma, idx[1L]] <- " & "
+    coefs[-ma, idx[2L]] <- " "
+  }
+  
+  for(i in seq_along(objs_ddh)){
+    ddh <- objs_ddh[[i]]
+    ma <- match(names(ddh$fixed_effects), cos)
+    stopifnot(!anyNA(ma))
+    
+    coefs[ma, 2L * length(objs_glm) + i] <- sprintf("%.3f", ddh$fixed_effects)
+  }
+  
+  # remove rows with more than one term 
+  assg <- attr(model.matrix(terms(glm_base_new), dat_con), "assign")
+  coefs <- coefs[!duplicated(assg), ]
+  is_dup <- table(assg) > 1L
+  idx <- c(seq_along(objs_ddh) + 2L * length(objs_glm))
+  coefs[is_dup, idx] <- cmark
+  
+  # we may have set some `NA` values to checkmarks
+  for(i in seq_along(objs_glm))
+    coefs[is.na(coefs[, i * 2L]), (i - 1L) * 2L + 1L] <- NA_character_
+  
+  # get the labels and print out
+  for(i in 1:nrow(coefs)){
+    # row name
+    na <- rownames(coefs)[i]
+    na <- if(na == "(Intercept)") "Intercept" else {
+      na <- gsub(
+        "(wz\\()([a-zA-Z0-9_]+)(,.+|\\))", "\\2", na, perl = TRUE)
+      regexp <- "(sp_w_c\\()([a-zA-Z0-9_]+)(,.+|\\))"
+      is_spline <- grepl(regexp, na, perl = TRUE)
+      na <- gsub(regexp, "\\2", na, perl = TRUE)
+      
+      if(is_spline) 
+        paste0(get_label(na), " (spline)") else 
+          get_label(na)
+    }
+  
+    cat(na, "& ", paste0(coefs[i, ], collapse = " & "), "\\\\\n")
+  }
+  cat("\\midrule\n")
+  
+  #####
+  # parameters related to frailty model
+  theta <- matrix(NA_real_, 2, 2)
+  theta[1, 1] <- objs_ddh[[1L]]$F
+  theta[, 2]  <- diag(objs_ddh[[2L]]$F)
+  
+  sds <- matrix(NA_real_, 2, 2)
+  sds[1, 1] <- sqrt(objs_ddh[[1L]]$Q)
+  sds[, 2]  <- sqrt(diag(objs_ddh[[2L]]$Q))
+  
+  cors <- matrix(NA_real_, 1, 2)
+  cors[, 2] <- cov2cor(objs_ddh[[2L]]$Q)[1, 2]
+  
+  fra_params <- rbind(theta, sds, cors)
+  stopifnot(nrow(cors) == 1L)
+  rownames(fra_params) <- c(
+    paste0("$\\theta_{", 1:nrow(theta), "}$"),
+    paste0("$\\sigma_{", 1:nrow(sds), "}$"), 
+    "$\\rho$")
+  
+  for(i in 1:nrow(fra_params)){
+    z <- fra_params[i, ]
+    cat(
+      rownames(fra_params)[i], "& ", rep(" & & & ", length(objs_glm)), 
+      paste0(ifelse(is.na(z), "", sprintf("%.3f", z)), collapse = " & "), 
+      "\\\\\n")
+  }
+  cat("\\midrule\n")
+  
+  #####
+  # remaining stats
+  cor_logLike_n_aic <- function(fit){
+    stopifnot(
+        inherits(fit, "glm"), fit$family$family == "poisson", 
+        fit$family$link == "log", any(fit$offset != fit$offset[1]), 
+        all(fit$y %in% 0:1))
+      
+    adjust <- - sum(fit$offset[fit$y])
+    ll <- logLik(fit) + adjust
+    aic <- AIC(fit) - 2 * adjust
+    c(logLik = c(ll), df = attr(ll, "df"), AIC = aic)
+  }
+  
+  lls_aics_glm <- sapply(objs_glm, cor_logLike_n_aic)
+  lls_aics_ddh <- sapply(objs_ddh, function(x) 
+    c(logLik = logLik(x), AIC = AIC(x)))
+  
+  cat("AIC &", paste0(
+    sprintf("%.1f", lls_aics_glm["AIC", ]), " & & ", collapse = " & "), " & ", 
+    paste0(sprintf("%.1f", lls_aics_ddh["AIC", ]), collapse = " & "), "\\\\\n")
+  cat("log-liklihood &", paste0(
+    sprintf("%.1f", lls_aics_glm["logLik", ]), " & & ", collapse = " & "), " & ", 
+    paste0(sprintf("%.1f", lls_aics_ddh["logLik", ]), collapse = " & "), 
+    "\\\\\n")
+  n_firms <- length(unique(dat_con$gvkey))
+  cat("Number of firms &", paste0(
+    rep(paste0(n_firms, " & & "), length(objs_glm)), collapse = " & "), " & ",
+    paste0(rep(n_firms, length(objs_ddh)), collapse = "& "), "\\\\\n", 
+    "\\bottomrule\n", 
+    "\\end{tabular}", sep = "")
+})
+```
+
+</div>
+
+## Out-of-sample
+
+We perform the out-of-sample test in two step. First, we fit the models. 
+Then we forecast. We start by fitting the models
+
+<div class="hideable">
+
+```{r fit_out_of_sample}
+dat_con$yr <- as.integer(dat_con$d_yr)
+yrs <- 1998:(max(dat_con$yr) - 1L)
+
+do_re_run_expr <- expression(
+  if(exists("do_re_run"))
+    do_re_run else 
+      do_re_run <- as.character(tcltk::tkmessageBox(
+        message = "Do you want to re-run the out-of-sample models?", 
+        type = "yesno")) == "yes")
+
+f1_prefix <- file.path(
+  "markdown", "output", "outsample-state-rng-inter")
+f2_prefix <- file.path(
+  "markdown", "output", "outsample-state-rng-size-inter")
+for(y_i in yrs){
+  dat_y <- subset(dat_con, yr <= y_i)
+  
+  #####
+  # fit model with random intercept
+  f_name <- paste0(f1_prefix, "-", y_i, ".RDS")
+  if(!file.exists(f_name) | eval(do_re_run_expr)){
+    set.seed(54820338)
+    log_n_eval({
+      fit <- PF_EM(
+        fixed = frm_fixed, random = ~ 1, 
+        data = dat_y,
+        model = "exponential", by = 12L, max_T = max(dat_y$tstop), 
+        id = dat_y$gvkey_int, 
+        
+        # start close to values from full period as of 2019/02/16
+        Q = diag(0.099, 1), Fmat = diag(0.074, 1), 
+        fixed_effects = c(
+          -8.9, -0.61, -1.4, -0.2, -1.7, 0.99, -0.29, 83, -1.2, -0.2, 
+          0.014, 0.032, 4.9, 0.9, 0.045, 0.39, -0.17, -1.9, -3, 9.6),
+        
+        type = "VAR", control = PF_control(
+          N_fw_n_bw = 2000L, N_smooth = 1000L, N_first = 2000L, n_max = 100L, 
+          n_threads = n_threads, nu = 8L, N_smooth_final = 300L,
+          smoother = "Fearnhead_O_N", eps = 1e-4), 
+        trace = 1L)
+    }, paste0("_outsample-rng-inter-", y_i))
+    
+    saveRDS(fit, f_name)
+  }
+  
+  #####
+  # fit model with random intercept and size slope
+  f_name <- paste0(f2_prefix, "-", y_i, ".RDS")
+  if(!file.exists(f_name) | eval(do_re_run_expr)){
+    set.seed(54820338)
+    log_n_eval({
+      fit <- PF_EM(
+        fixed = frm_fixed, random = ~ 1 + wz(rel_size), 
+        data = dat_y,
+        model = "exponential", by = 12L, max_T = max(dat_y$tstop), 
+        id = dat_y$gvkey_int, 
+        
+        J = diag(1, 2), Q_0 = diag(1, 2),
+        G = matrix(c(1, 0, 
+                     0, 0, 
+                     0, 0, 
+                     0, 1), byrow = TRUE, ncol = 2),  
+        K = matrix(1, 1, 1),
+        
+        # start close to values from full period as of 2019/02/16
+        theta = c(0.49, 0.62), phi = 5.5, psi = c(-0.36, -1.9), 
+        fixed_effects = c(
+          -8.9, -0.61, -1.5, -0.2, -1.7, 0.97, -0.29, 91, -1.2, -0.22, 
+          0.015, -0.17, 0.35, 0.94, -0.075, 0.34, -0.27, -2.1, -3.3, 9.5),
+        
+        type = "VAR", control = PF_control(
+          N_fw_n_bw = 1000L, N_smooth = 1000L, N_first = 1000L, n_max = 100L, 
+          n_threads = n_threads, nu = 8L, N_smooth_final = 300L,
+          smoother = "Fearnhead_O_N", eps = 1e-4), 
+        trace = 1L)
+    }, paste0("_outsample-rng-size-inter-", y_i))
+    
+    saveRDS(fit, f_name)
+  }
+}
+```
+
+</div>
+
+Load objects and check results
+
+<div class="hideable">
+
+```{r check_fit_out_of_sample}
+# find the files
+fs <- list.files(file.path("markdown", "output"), full.names = TRUE)
+inter_ms <- fs[grepl("outsample\\-state\\-rng\\-inter", fs)]
+size_inter_ms <- fs[grepl("outsample\\-state\\-rng\\-size\\-inter", fs)]
+
+# add the years
+names(inter_ms) <- gsub("(.+)(\\d{4})(\\.RDS)$", "\\2", inter_ms)
+names(size_inter_ms) <- gsub("(.+)(\\d{4})(\\.RDS)$", "\\2", size_inter_ms)
+
+# load the objects
+inter_ms <- lapply(inter_ms, readRDS)
+size_inter_ms <- lapply(size_inter_ms, readRDS)
+
+# check that they all converged
+par(mar = c(5, 4, .5, .5), mfcol = c(2, 2))
+for(o in names(inter_ms))
+  plot(inter_ms[[o]]$log_likes, ylab = o, type = "l")
+for(o in names(size_inter_ms))
+  plot(size_inter_ms[[o]]$log_likes, ylab = o, type = "l")
+
+# quickly check coefficients
+signif(sapply(inter_ms, "[[", "fixed_effects"), 2)
+sapply(inter_ms, "[[", "Q")
+sapply(inter_ms, "[[", "F")
+
+signif(sapply(size_inter_ms, "[[", "fixed_effects"), 2)
+sapply(size_inter_ms, "[[", "Q")
+sapply(size_inter_ms, "[[", "theta")
+
+ll1 <- sapply(inter_ms     , logLik)
+ll2 <- sapply(size_inter_ms, logLik)
+par(mar = c(5, 4, .5, .5), mfcol = c(1, 1))
+plot(ll2 - ll1, ylim = range(0, ll2 - ll1))
+
+# plot smoothed particle paths
+par(mar = c(5, 4, .5, .5), mfcol = c(2, 2))
+local({
+  min_x <- min(as.integer(dat_con$d_yr))
+  x_lim <- range(as.integer(dat_con$d_yr))
+  library(lubridate)
+  dx <- (month(make_ym_inv(min(dat_con$tstart))) - 1L) / 12
+  
+  for(o in names(inter_ms))
+    pf_plot_effects(
+      inter_ms[[o]], x = min_x:as.integer(o) + dx, ylabs = "Intercept", 
+      x_lim = x_lim, change_par = FALSE)
+  
+  for(o in names(size_inter_ms))
+    pf_plot_effects(
+      size_inter_ms[[o]], x = min_x:as.integer(o) + dx, x_lim = x_lim, 
+      ylabs = c("Intercept", get_label("rel_size")), change_par = FALSE)
+})
+
+# plot effective sample size of forward particle filter
+par(mar = c(5, 4, .5, .5), mfcol = c(2, 2))
+local({
+  for(o in inter_ms)
+    plot(o$effective_sample_size$forward_clouds, type = "h", 
+         ylim = range(0, o$effective_sample_size$forward_clouds))
+  
+  for(o in size_inter_ms)
+    plot(o$effective_sample_size$forward_clouds, type = "h", 
+         ylim = range(0, o$effective_sample_size$forward_clouds))
+})
+```
+
+</div>
+
+Forecast
+
+<div class="hideable">
+
+Function to estimate the hazard with censored data
+
+```{r def_est_haz}
+# y is a `Surv` object
+est_haz <- function(y){
+  stopifnot(inherits(y, "Surv"), attr(y, "type") == "right")
+  n_events <- sum(y[, 2])
+  sum_time <- sum(y[, 1])
+  
+  n_events / sum_time
+}
+
+local({
+  # illustrate that the result is correct
+  library(survival)
+  tmp <- survreg(Surv(futime, fustat) ~ 1, ovarian, dist= "exponential")
+  stopifnot(all.equal(
+    unname(exp(-tmp$coefficients)), 
+    with(ovarian, est_haz(Surv(futime, fustat)))))
+})
+```
+
+Forecast outcomes with models with frailty
+
+<!-- 
+  knitr::opts_knit$set(output.dir = ".")
+  knitr::load_cache(
+      "forecast", 
+      path = paste0(file.path("markdown", "cache", "rng-effects-annual"), 
+                    .Platform$file.sep))
+--> 
+
+```{r forecast, cache = 1}
+# assign function to perform the simulation
+forecast_func <- function(fit, y_i, n_sim = 10000L, cl){
+  stopifnot(is.integer(y_i), is.integer(n_sim), n_sim > 0L, 
+            inherits(fit, "PF_EM"), 
+            fit$call$model == "exponential")
+  
+  # get data. `y_i` is the year up to which we use to estimate the model uses 
+  # so we increament by one
+  y_i <- y_i + 1L
+  dat_y <- subset(dat_con, yr == y_i)
+  
+  # get design matrices
+  eta <- drop(model.matrix(fit$terms$fixed, dat_y) %*% fit$fixed_effects)
+  Z <- model.matrix(fit$terms$random, dat_y)
+  cloud <- tail(fit$clouds$forward_clouds, 1)[[1L]]
+  F. <- fit$F
+  Q_chol <- t(chol(fit$Q))
+  # account for censoring. TODO: We may not properly handle the cases where 
+  # `y == 1` now...
+  exp_offset <- with(dat_y, ifelse(y, 12, (tstop - tstart)))
+
+  # simulate states, compute probabilities, and simulate outcomes
+  clusterExport(cl, c("eta", "Z", "cloud", "F.", "Q_chol", "exp_offset"), 
+                environment())
+  out <- parLapply(cl, 1:n_sim, function(...){
+    require(survival)
+    # draw parent
+    idx <- sample.int(length(cloud$weights), 1L, prob = cloud$weights)
+    parent <- cloud$states[, idx]
+    
+    # simulate state, compute hazard rate, and draw outcome
+    state <- F. %*% parent + Q_chol %*% rnorm(ncol(Q_chol))
+    haz <- exp(drop(Z %*% state + eta))
+    n <- length(haz)
+    y <- rexp(n, haz)
+    out <- Surv(y, rep(1, n))
+    is_censored <- out[, 1] > exp_offset
+    out[is_censored, ] <- 
+      Surv(exp_offset[is_censored], rep(0, sum(is_censored)))
+    
+    list(haz = haz, y_sim = out)
+  })
+  
+  # one mean hazard for each observation
+  haz <- rowMeans(sapply(out, "[[", "haz"))
+  # distress rate for each simulated state
+  d_rate <- parSapply(cl, lapply(out, "[[", "y_sim"), est_haz)
+  
+  list(haz = haz, d_rate = d_rate)
+}
+
+# use function
+library(parallel)
+cl <- makeCluster(6L)
+set.seed(64010384)
+clusterSetRNGStream(cl)
+
+inter_ms_forceast <- mapply(
+  forecast_func, fit = inter_ms, SIMPLIFY = FALSE, MoreArgs = list(cl = cl),
+  y_i = as.integer(names(inter_ms)), n_sim = 100000L)
+size_inter_ms_forceast <- mapply(
+  forecast_func, fit = size_inter_ms, SIMPLIFY = FALSE, 
+  MoreArgs = list(cl = cl),
+  y_i = as.integer(names(size_inter_ms)), n_sim = 100000L)
+
+stopCluster(cl)
+rm(forecast_func)
+```
+
+Do the same for models without frailty
+
+<!-- 
+  knitr::opts_knit$set(output.dir = ".")
+  knitr::load_cache(
+      "out_sample_no_frailty", 
+      path = paste0(file.path("markdown", "cache", "rng-effects-annual"), 
+                    .Platform$file.sep))
+--> 
+
+```{r out_sample_no_frailty, cache = 1}
+# define function to fit models, compute out-of-sample hazards, and simulate
+# outcome to compute hazard rate distribution
+out_sample_glm <- function(frm, cl, n_sim){
+  yrs <- 1998:(max(dat_con$yr) - 1L)
+  
+  out <- lapply(yrs, function(y_i){
+    # fit model
+    fit <- glm(
+      frm, family = poisson(), data = subset(dat_con, yr <= y_i), 
+      offset = log(tstop - tstart))
+    
+    # simulate hazard rate
+    dat_y <- subset(dat_con, yr == y_i + 1L)
+    haz <- exp(drop(model.matrix(terms(fit), dat_y) %*% fit$coefficients))
+    # account for censoring. TODO: We may not properly handle the cases where 
+    # `y == 1` now...
+    exp_offset <- with(dat_y, ifelse(y, 12, (tstop - tstart)))
+  
+    # simulate states, compute probabilities, and simulate outcomes
+    clusterExport(cl, c("haz", "exp_offset"),  environment())
+    y_sim <- parLapply(cl, 1:n_sim, function(...){
+      require(survival)
+      
+      # draw outcome
+      n <- length(haz)
+      y <- rexp(n, haz)
+      out <- Surv(y, rep(1, n))
+      is_censored <- out[, 1] > exp_offset
+      out[is_censored, ] <- 
+        Surv(exp_offset[is_censored], rep(0, sum(is_censored)))
+      
+      out
+    })
+    
+    d_rate <- parSapply(cl, y_sim, est_haz)
+    list(haz = haz, d_rate = d_rate, coef = coef(fit), ll = logLik(fit))
+  })
+  
+  names(out) <- yrs
+  out
+}
+
+# use function
+library(parallel)
+cl <- makeCluster(6L)
+set.seed(64010384)
+clusterSetRNGStream(cl)
+
+duffie_et_al <- out_sample_glm(frm_simple, cl, n_sim = 100000L)
+base_fit_outsample <- out_sample_glm(frm, cl, n_sim = 100000L)
+
+stopCluster(cl)
+rm(out_sample_glm)
+```
+
+Check results
+
+```{r check_out_sample_no_frailty}
+# coefficients
+signif(x <- do.call(cbind, lapply(duffie_et_al, "[[", "coef")), 2)
+signif(x <- do.call(cbind, lapply(base_fit_outsample, "[[", "coef")), 2)
+```
+
+</div>
+
+Illustrate results
+
+<div class="hideable">
+
+```{r out_of_sample_illustrations}
+library(survival)
+
+#####
+# Make plots and figures. Start by getting figures
+objs <- list(
+  `Duffie et al.`          = duffie_et_al, 
+  `No frailty`             = base_fit_outsample,
+  `Frailty: inter`         = inter_ms_forceast, 
+  `Frailty: inter & slope` = size_inter_ms_forceast) 
+stopifnot(all(sapply(objs[-1L], length) == length(objs[[1L]])), 
+          all(sapply(objs[-1L], names) == names(objs[[1L]])))
+
+yrs <- as.integer(names(objs[[1L]])) + 1L
+forecast_summary <- lapply(seq_along(yrs), function(i){ 
+  y_i <- yrs[i]
+  dat_y <- subset(dat_con, yr == y_i)
+  is_small <- with(dat_y, rel_size <= quantile(rel_size, .1))
+  os <- lapply(objs, "[[", i)
+  
+  concord <- lapply(os, function(o)
+    with(dat_y, survConcordance(Surv(tstop - tstart, y) ~ o$haz)))
+  concord_small <- lapply(os, function(o)
+    with(dat_y[is_small, ], 
+         survConcordance(Surv(tstop - tstart, y) ~ o$haz[is_small])))
+  concord_large <- lapply(os, function(o)
+    with(dat_y[!is_small, ], 
+         survConcordance(Surv(tstop - tstart, y) ~ o$haz[!is_small])))
+  
+  # compute AUC where we ignore time of the events and assume that censoring
+  # events are terminal
+  require(pROC)
+  aucs <- lapply(os, function(o) c(auc(dat_y$y, o$haz)))
+
+  haz_realized <- with(dat_y, est_haz(Surv((tstop - tstart), y)))
+  haz_sim_dist <- sapply(os, function(o) 
+    quantile(o$d_rate, c(.05, .5, .95)))
+  
+  list(concord = concord, concord_small = concord_small, 
+       concord_large = concord_large, aucs = aucs, 
+       haz_realized = haz_realized, y_i = y_i, haz_sim_dist = haz_sim_dist)
+})
+
+#####
+# plot of hazard rate
+xs <- sapply(forecast_summary, "[[", "y_i") + 1L + 
+  (month(make_ym_inv(min(dat_con$tstart))) - 1L) / 12
+haz_realized <- sapply(forecast_summary, "[[", "haz_realized")
+qs <- lapply(forecast_summary, "[[", "haz_sim_dist")
+
+n_models <- ncol(qs[[1L]])
+xs_i <- outer(seq(-.2, .2, length.out = n_models), xs, "+")
+
+get_plot_device({
+  par(mar = c(5, 4, .5, .5))
+  plot(xs, haz_realized, ylim = range(unlist(qs), haz_realized), 
+       xlab = "Year", ylab = "Hazard", pch = 4, xlim = range(xs_i))
+  
+  pch <- c(5, 6, 17, 18)
+  for(i in seq_along(qs)){
+    xs_i_j <- xs_i[, i]
+    qs_j <- qs[[i]]
+    
+    arrows(xs_i_j, qs_j[1, ], xs_i_j, qs_j[3, ], length = 0.05, angle = 90, 
+           code = 3, col = "DarkGray")
+    points(xs_i_j, qs_j[2, ], pch = pch)
+  }
+  
+  nber_poly()
+}, "hazard-rate-out-sample")
+
+#####
+# concordance
+con <- sapply(
+  lapply(forecast_summary, "[[","concord"), function(x)
+    sapply(x, "[[", "concordance"))
+con_small <- sapply(
+  lapply(forecast_summary, "[[","concord_small"), function(x)
+    sapply(x, "[[", "concordance"))
+con_large <- sapply(
+  lapply(forecast_summary, "[[","concord_large"), function(x)
+    sapply(x, "[[", "concordance"))
+con_large[is.nan(con_large)] <- 1
+xs_i <- outer(seq(-.2, .2, length.out = n_models), xs, "+")
+
+func <- function(y, ylab){
+  plot(xs_i, y, type = "n", ylim = range(y, 1), ylab = "Concordance", 
+       xlab = "Year")
+  for(i in 1:n_models)
+    points(xs_i[i, ], y[i, ], pch = pch[i])
+  nber_poly()
+}
+
+get_plot_device(func(con), "concordance-out-sample")
+get_plot_device(func(con_small), "concordance-out-sample-small")
+get_plot_device(func(con_large), "concordance-out-sample-large")
+
+#####
+# auc -- ignore time of the event
+aucs <- sapply(forecast_summary, "[[","aucs")
+plot(xs_i, aucs, type = "n", ylim = range(aucs, 1), ylab = "AUC", 
+       xlab = "Year")
+for(i in 1:n_models)
+  points(xs_i[i, ], aucs[i, ], pch = pch[i])
+nber_poly()
+```
+
+</div>
+
+## Plot splines
+
+<div class="hideable">
+
+```{r plot_splines}
+plot_sp_w_c <- function(term, ddfit, base = base_fit, xlab, vals_only = FALSE){
+  #####
+  # find term index
+  tt <- ddfit$terms$fixed
+  sp_tr <- which(grepl(paste0("^sp_w_c\\(", term), attr(tt, "term.labels")))
+  wz_tr <- which(grepl(paste0("^wz\\(", term), attr(tt, "term.labels")))
+  stopifnot(length(sp_tr) == 1L, length(wz_tr) == 1L)
+  
+  #####
+  # make dummy data and get model matrix
+  x_range <- quantile(eval(parse(text = term), base$data), probs = c(.01, .99))
+  x <- seq(x_range[1], x_range[2],length.out = 1000)
+  df <- data.frame(x)
+  colnames(df) <- term
+  
+  n_terms <- length(attr(tt, "term.labels"))
+  tt <- drop.terms(tt, setdiff(1:n_terms, c(wz_tr, sp_tr)))
+  attr(tt, "intercept") <- 0
+  M <- model.matrix(tt, df)
+  
+  cl <- colnames(M)
+  l1 <- drop(M %*% ddfit$fixed_effects[cl])
+  l2 <- drop(M %*% coef(base)[cl])
+  cv <- vcov(base)[cl, cl]
+  l2_se <- sqrt(diag(M %*% tcrossprod(cv, M)))
+  l2_lb <- l2 - 1.96 * l2_se 
+  l2_ub <- l2 + 1.96 * l2_se 
+  
+  if(vals_only)
+    return(list(x = x, rng = l1, base = l2, base_lb = l2_lb, 
+                base_ub = l2_ub))
+  
+  #####
+  # plot
+  plot(x, l1, type = "l", 
+       ylab = "Linear predictor term", xlab = xlab, 
+       ylim = range(l1, l2, l2_lb, l2_ub))
+  lines(x, l2, lty = 2)
+  lines(x, l2_lb, lty = 2, col = "DarkGray")
+  lines(x, l2_ub, lty = 2, col = "DarkGray")
+}
+
+get_plot_device({
+  x1 <- plot_sp_w_c("sigma", state_rng_size_inter_large, vals_only = TRUE)
+  x2 <- plot_sp_w_c("sigma", state_rng_inter_large, vals_only = TRUE)
+  matplot(
+    x1$x, cbind(x1$base, x1$rng, x2$rng, x1$base_lb, x1$base_ub), 
+    lty = c(3, 1, 2, 3, 3), col = "black", 
+    type = "l", xlab = get_label("sigma"), ylab = "Log-hazard term")
+  
+  x1 <- plot_sp_w_c("r_niq_nn", state_rng_size_inter_large, vals_only = TRUE)
+  x2 <- plot_sp_w_c("r_niq_nn", state_rng_inter_large, vals_only = TRUE)
+  matplot(
+    x1$x, cbind(x1$base, x1$rng, x2$rng, x1$base_lb, x1$base_ub), 
+    lty = c(3, 1, 2, 3, 3), col = "black", 
+    type = "l", xlab = get_label("r_niq_nn"), ylab = "Log-hazard term")
+}, "splines-rng-annual", onefile = FALSE)
+```
+
+</div>

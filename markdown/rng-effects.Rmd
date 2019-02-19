@@ -1,0 +1,1327 @@
+---
+title: "Model with random effects"
+author: 
+  - Rastin Matin
+  - Benjamin Christoffersen 
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:  
+  html_document:
+    toc: true
+bibliography: refs.bib
+---
+
+<script>
+$(document).ready(function(){
+  var hide_divs = $("div.hideable");
+  hide_divs.each(function(){
+    // Wrap content in div
+    $(this).wrapInner( "<div class='hideable_content', style='display: none;'></div>");
+    
+    // Add button
+    $(this).prepend("<button id='toogle'>show</button>");
+  });
+  
+  // Add hideable btn
+  // Put the rest in a div
+  
+  $("div.hideable button#toogle").click(function(){
+    var parent = $(this).parent();
+    var target_div = $(parent).find("div.hideable_content");
+    
+    if(target_div.css("display") == "none"){
+      target_div.show();
+        $(this).text("Hide");
+    } else {
+      target_div.hide();
+      $(this).text("Show");
+    }
+  });
+});
+</script>
+
+## Load data
+
+```{r static_setup, include=FALSE, cache=FALSE}
+# please do not set options here that could change...
+knitr::opts_chunk$set(
+  cache.path = 
+    paste0(file.path("cache", "rng-effects"), .Platform$file.sep), 
+  fig.path = 
+    paste0(file.path("fig"  , "rng-effects"), .Platform$file.sep))
+```
+
+```{r def_data_files}
+# assign file names
+fs <- list(
+  dat          = file.path("data", "final.RDS"), 
+  regres_funcs = file.path("R", "regres_funcs.R"))
+```
+
+```{r check_rebuild, echo = FALSE, cache = TRUE, cache.extra = tools::md5sum(unlist(fs))}
+# see https://stackoverflow.com/a/52163751/5861244
+knitr::opts_chunk$set(cache.rebuild = TRUE)
+```
+
+```{r setup, include=FALSE, cache=FALSE}
+# please do set options here that could change...
+knitr::opts_chunk$set(
+  echo = TRUE, fig.height = 4, fig.width = 7, dpi = 72, comment = "#R", 
+  error = FALSE)
+options(digits = 4, scipen = 10, width = 90)
+```
+
+Source scripts with the R functions we need 
+
+<div class="hideable">
+
+```{r source_r_funcs}
+source(fs$regres_funcs, echo = TRUE, max.deparse.length = 5000)
+source(file.path("R", "get_plot_device.R"), echo = TRUE, 
+       max.deparse.length = 5000)
+source(file.path("R", "get_label.R"), echo = TRUE, 
+       max.deparse.length = 5000)
+source(file.path("R", "cycles.R"), echo = TRUE, 
+       max.deparse.length = 5000)
+
+# change default. It decreases the computation time
+formals(wz)$do_center <- TRUE
+```
+
+</div>
+
+Load the data
+
+```{r load_dat}
+tmp <- readRDS(fs$dat)
+dat <- tmp$data
+make_ym <- tmp$ym_funcs$make_ym
+make_ym_inv <- tmp$ym_funcs$make_ym_inv
+
+# the branch and commit id the data set was made with 
+tmp$git_info
+rm(tmp)
+```
+
+Show some properties and prepare the data
+
+<div class="hideable">
+
+```{r show_prop}
+# exclude firms before they are first rated or after they stop being rated
+(o <- with(dat, table(
+  y,
+  `before first rating date` = tstart < start_rated_ym, 
+  `after last rating date`   = tstop  > stop_rated_ym,
+  useNA = "ifany")))
+round(prop.table(o, margin = 2:3), 5)
+
+table(dat$y)
+dat <- subset(dat, !is.na(start_rated_ym) & tstart >= start_rated_ym)
+table(dat$y)
+dat <- subset(dat, tstop <= stop_rated_ym) 
+table(dat$y)
+
+# starts and ends dates
+make_ym_inv(min(dat$tstart))
+make_ym_inv(max(dat$tstop))
+
+# tstop of last event. We assume this is the most recent data from Moodys
+max_is_ev <- with(subset(dat, y == TRUE), max(tstop))
+make_ym_inv(max_is_ev)
+dat <- subset(dat, tstop <= max_is_ev)
+
+# max time between stop time and event. Most happen in the same month of the
+# observations. Thus, we may miss only a few events in the end of the sample
+table(with(subset(dat, y), distress_time - tstop))
+
+# we assume that a macro avariable is included to all such that each 
+# row represents one month. Otherwise we need to change in the rest of 
+# this file...
+stopifnot(all(dat$stop - dat$start == 1))
+
+# have to deal with recurrent events which are not directly supported by 
+# with the functions we use
+library(data.table)
+dat <- data.table(dat)
+setkey(dat, gvkey, tstart) # sort data
+# assumes that data is sorted
+func <- function(y){
+  y <- cumsum(y)
+  y <- c(0, head(y, -1))
+  c("", paste0(".", letters))[y + 1L]
+}
+func(c(F, F, F, T, F, F, T, F, T)) # example
+dat[, gvkey_unique := paste0(gvkey, func(y)), by = gvkey]
+stopifnot(all(dat[, sum(y) %in% 0:1, by = gvkey_unique]$V1))
+dat <- as.data.frame(dat)
+dat$gvkey_unique <- as.integer(as.factor(dat$gvkey_unique))
+
+#####
+# remove observations with missing data
+vars <- c("r_wcapq_atq", "r_req_atq", "r_oiadpq_atq", "r_mv_ltq",
+          "r_saleq_atq", "r_niq_atq", "r_ltq_atq", "r_actq_lctq", "sigma",
+          "excess_ret", "rel_size")
+
+# check cor
+local({
+  tmp <- cor(dat[, c(vars, "dtd")], use = "pairwise.complete.obs")
+  tmp[abs(tmp) < 0.3] <- NA_real_
+  tmp[upper.tri(tmp, diag = TRUE)] <- NA_real_
+  print(tmp[-1, ], na.print = "")
+  
+  cat("\n\nWinsorized\n")
+  tmp <- cor(dat[, c(vars, "dtd")], use = "pairwise.complete.obs")
+  tmp <- apply(tmp, 2, wz)
+  tmp[abs(tmp) < 0.3] <- NA_real_
+  tmp[upper.tri(tmp, diag = TRUE)] <- NA_real_
+  print(tmp[-1, ], na.print = "")
+})
+
+# keep only complete case
+nrow(dat)
+dat <- dat[complete.cases(dat[, vars]), ]
+nrow(dat)
+```
+
+## Model without random effects
+
+Fit model without random effects
+
+<div class="hideable">
+
+```{r ass_frm_dd, cache = 1}
+frm <- y ~ wz(r_wcapq_nn) + wz(r_oiadpq_nn) + wz(r_mv_ltq) + wz(r_niq_nn) + 
+  wz(r_ltq_nn) + wz(r_actq_lctq) + wz(sigma) + wz(excess_ret) + 
+  wz(rel_size) + wz(dtd) + log_market_ret + r1y + sp_w_c(r_niq_nn, 4) +
+  # knot is only chosen as a knot closer towards zero 
+  # yields a collinear basis function after weighting
+  sp_w_c(sigma, 4, knots = .04) + wz(r_actq_lctq):wz(sigma)
+```
+
+
+```{r fit_no_rng}
+# fit model without random effects
+base_fit <- glm(frm, binomial("cloglog"), dat)
+summary(base_fit)
+logLik(base_fit)
+```
+
+</div>
+
+Fit models with time fixed effects and interactions to show variation 
+through time
+
+<div class="hideable">
+
+```{r check_time_var_rel_size, cache = 1}
+# make breaks
+n_brs <- 8L
+brs <- dat$tstop
+brs <- seq.int(min(brs), max(brs), length.out = n_brs)
+brs <- as.integer(brs)
+brs[n_brs] <- max(dat$tstop)
+brs[1] <- brs[1] - 1L
+
+# make dummies
+labs <- paste0(
+  "(", format(make_ym_inv(brs[-n_brs]), "%Y-%m"), ", " ,
+  format(make_ym_inv(brs[-1]), "%Y-%m"), "]")
+
+dat$year_dummy <- cut(dat$tstop, breaks = brs, labels = labs)
+stopifnot(!anyNA(dat$year_dummy))
+table(dat$year_dummy, dat$y)
+
+# run regression
+local({
+  t0 <- update(base_fit, . ~ . + year_dummy - 1)
+  print(summary(t0))
+  
+  t1 <- update(
+    t0, . ~ . - wz(rel_size) + wz(rel_size):year_dummy)
+  print(summary(t1))
+  
+  t2 <- update(
+    t1, . ~ . - wz(r_niq_nn) + wz(r_niq_nn):year_dummy)
+  print(summary(t2))
+  
+  # industry effects
+  t3 <- update(t2, . ~ . + sic_grp:year_dummy)
+  print(summary(t3))
+  
+  anova(base_fit, t0, t1, t2, t3, test = "LRT")
+})
+```
+
+</div>
+
+```{r check_rebuild_extra, include = FALSE}
+if(!interactive()){
+  .check_before_merge <- file.path("markdown", "cache", "rng_check")
+  if(!file.exists(.check_before_merge)){
+    knitr::opts_chunk$set(cache.rebuild = TRUE)
+  } else
+    knitr::opts_chunk$set(
+      cache.rebuild = knitr::opts_chunk$get("cache.rebuild") ||
+        !readRDS(.check_before_merge) == digest::digest(dat))
+  
+  saveRDS(digest::digest(dat), .check_before_merge)
+}
+```
+
+## State space models 
+
+### Simple model
+
+Fit model as in @Duffie09
+
+```{r load_dynamhaz}
+library(dynamichazard)
+```
+
+```{r set_n_threads}
+# set number of threads
+n_threads <- 8L
+```
+
+```{r assign_log_n_eval}
+# function to sink output to log file
+log_n_eval <- function(expr, log_prefix){
+  # setup directories and files to keep track of output
+  f_name <- paste0("rng-effects", log_prefix, "_", format(Sys.Date()))
+  f_dir <- file.path("markdown", "logs", paste0(f_name))
+  sink(    file.path("markdown", "logs", paste0(f_name, ".log")))
+  dir.create(tmp_dir <- tempfile())
+  png(file.path(tmp_dir, "Rplot%04d.png"))
+  
+  # clean-up
+  on.exit({
+    sink()
+    dev.off()
+    try({
+      if(!dir.exists(f_dir))
+        dir.create(f_dir)
+      if(length(new_files <- list.files(tmp_dir, full.names = TRUE)) > 0)
+        file.copy(new_files, f_dir, overwrite = TRUE)
+      unlink(tmp_dir, recursive = TRUE)
+    })
+    rm(f_dir, f_name, new_files)
+  })
+  
+  # make call
+  eval(substitute(expr), parent.frame())
+}
+```
+
+<!-- 
+  knitr::opts_knit$set(output.dir = ".")
+  knitr::load_cache(
+      "fit_duffie_09", 
+      path = paste0(file.path("markdown", "cache", "rng-effects"), 
+                    .Platform$file.sep))
+--> 
+
+<div class="hideable">
+
+```{r fit_duffie_09, cache = 1}
+set.seed(seed <- 96092198)
+log_n_eval({
+  duffie_09 <- PF_EM(
+    fixed = Surv(tstart, tstop, y) ~ wz(dtd) + wz(excess_ret) + r1y + 
+      log_market_ret, 
+    random = ~ 1, data = dat, Fmat = diag(.5, 1),
+    model = "cloglog", by = 1L, max_T = max(dat$tstop), id = dat$gvkey_unique, 
+    Q_0 = 2^2, Q = .1^2, type = "VAR", control = PF_control(
+      N_fw_n_bw = 200L, N_smooth = 200L, N_first = 1000L, n_max = 100, 
+      N_smooth_final = 100L, n_threads = n_threads, nu = 8L, 
+      smoother = "Fearnhead_O_N", eps = 1e-4), 
+    trace = 1L)
+}, "_duffie_09")
+```
+
+Take more iterations
+
+```{r def_take_xtra, cache = 1}
+take_xtra <- function(
+  fit, n_max = 10L, trace = 0L, N_fw_n_bw, N_smooth, N_first, N_smooth_final){
+  cl <- fit$call
+  ctrl <- cl[["control"]]
+  ctrl[c("N_fw_n_bw", "N_smooth", "N_first", "n_max", "N_smooth_final")] <- 
+    c(N_fw_n_bw, N_smooth, N_first, n_max, N_smooth_final)
+  cl[c("control", "trace")] <- list(ctrl, trace)
+  
+  . <- function(x, y)
+    eval(substitute({
+      if(!is.null(fit$x))  
+        cl$y <<- fit$x
+    }, list(x = substitute(x), 
+            y = if(missing(y)) substitute(x) else substitute(y))))
+  
+  .(a_0)
+  .(fixed_effects)
+  if(is.null(fit$psi)){
+    .(Q)
+    .(F, Fmat)
+    
+  } else {
+    .(phi, phi)
+    .(psi, psi)
+    .(theta, theta)
+    .(G, G)
+    .(J, J)
+    .(K, K) 
+  }
+  
+  cat("Running\n", paste0("  ", deparse(cl), collapse = "\n"), "\n", sep = "")
+  
+  eval(cl)
+}
+```
+
+<!-- 
+  knitr::opts_knit$set(output.dir = ".")
+  knitr::load_cache(
+      "xtra_fit_duffie_09", 
+      path = paste0(file.path("markdown", "cache", "rng-effects"), 
+                    .Platform$file.sep))
+--> 
+
+```{r xtra_fit_duffie_09, cache = 1, dependson = "fit_duffie_09"}
+set.seed(seed) 
+duffie_09_xtra <- take_xtra(
+  duffie_09, n_max = 1L, N_fw_n_bw = 500L, N_smooth = 2500L, N_first = 2500L, N_smooth_final = 2500L)
+```
+
+</div>
+
+Check the result
+
+<div class="hideable">
+
+```{r check_duffie_res}
+#####
+# plot smoothed random effect
+pf_plot_effects <- function(fit, qlvl = pnorm(-1) * 2, ylabs, type = "smoothed_clouds"){
+  stopifnot(type %in% c("smoothed_clouds", "forward_clouds"))
+  dp <- if(type != "smoothed_clouds") -1 else TRUE
+  o <- list(
+    mean = get_cloud_means(fit, type = type)[dp, , drop = FALSE],
+    qs = get_cloud_quantiles(fit, qlvls = c(qlvl/2, 1 - qlvl/2), 
+                             type = type)[, , dp, drop = FALSE])
+  cat(sprintf("%.2f pct. confidence intervals\n", (1 - qlvl) * 100))
+  
+  x <- make_ym_inv((min(dat$tstop)):max(dat$tstop))
+  stopifnot(nrow(o$mean) == length(x))
+  
+  par_old <- par(no.readonly = TRUE)
+  on.exit(par(par_old))
+  par(mar = c(5, 4, 1, 1))
+  for(i in 1:ncol(o$mean)){
+    me  <- o$mean[, i]
+    lbs <- o$qs[1, i, ]
+    ubs <- o$qs[2, i, ]
+    plot(o$mean[, i] ~ x, ylim = range(lbs, ubs, me, na.rm = TRUE), 
+         type = "l", xlab = "Year", ylab = ylabs[i])
+    nber_poly(TRUE)
+    lines(x, lbs, lty = 2)
+    lines(x, ubs, lty = 2)
+    abline(h = 0)
+  }
+}
+pf_plot_effects(duffie_09_xtra, ylabs = "Intercept")
+
+#####
+# plot effective sample size
+plot_eff <- function(fit){
+  eff <- fit$effective_sample_size$smoothed_clouds[-1]
+  x <- make_ym_inv((min(dat$tstart) + 1L):max(dat$tstart))
+  stopifnot(length(eff) == length(x))
+  
+  plot(eff ~ x, type = "h", xlab = "Year", ylab = "Effective sample size", 
+       ylim = range(eff, 0))
+}
+plot_eff(duffie_09)
+plot_eff(duffie_09_xtra)
+
+##### 
+# plot log-likelihood and estimates
+plot(duffie_09$log_likes)
+plot(duffie_09$EM_ests$F ~ sqrt(duffie_09$EM_ests$Q), 
+     xlab = expression(sigma), ylab = expression(varphi), type = "l")
+points(sqrt(duffie_09$EM_ests$Q), duffie_09$EM_ests$F, pch = 1)
+
+sqrt(duffie_09_xtra$Q)
+duffie_09_xtra$F
+duffie_09_xtra$fixed_effects
+
+logLik(duffie_09_xtra)
+local({
+  # same model without random effects
+  fix_only <- glm(y ~ wz(dtd) + wz(excess_ret) + r1y + log_market_ret, 
+                  binomial("cloglog"), dat)
+  print(AIC(base_fit, fix_only, duffie_09_xtra), digits = 6)
+  print(logLik(fix_only), digits = 6)
+})
+```
+
+Compare the coefficient estimates with @Duffie09 [table II] but keep in mind 
+that it is another sample period, only industrial firms, and 
+a 3 month T-bill rate.
+
+<!--
+  knitr::opts_knit$set(output.dir = ".")
+  knitr::load_cache(
+      "check_duffie_ll", 
+      path = paste0(file.path("markdown", "cache", "rng-effects"), 
+                    .Platform$file.sep))
+-->
+
+```{r check_duffie_ll, cache = 1, dependson = "fit_duffie_09_xtra"}
+set.seed(seed)
+print(duffie_LL <- 
+   logLik(PF_forward_filter(duffie_09_xtra, N_fw = 5000L, N_first = 10000L)), 
+   digits = 6)
+```
+
+</div>
+
+### Model with a random intercept
+
+Fit model
+
+<div class="hideable">
+
+<!-- 
+  knitr::opts_knit$set(output.dir = ".")
+  knitr::load_cache(
+      "state_full_rng_inter", 
+      path = paste0(file.path("markdown", "cache", "rng-effects"), 
+                    .Platform$file.sep))
+--> 
+
+```{r dd_fixed, cache = 1, dependson="ass_frm_dd"}
+frm_fixed <- update(frm, Surv(tstart, tstop, y) ~ .)
+```
+
+```{r state_full_rng_inter, cache = 1}
+set.seed(seed)
+log_n_eval({
+  state_rng_inter <- PF_EM(
+    fixed = frm_fixed, random = ~ 1, 
+    data = dat, Fmat = diag(.5, 1),
+    model = "cloglog", by = 1L, max_T = max(dat$tstop), id = dat$gvkey_unique, 
+    Q_0 = 2^2, Q = .1^2, type = "VAR", control = PF_control(
+      N_fw_n_bw = 200L, N_smooth = 200L, N_first = 1000L, n_max = 100L, 
+      n_threads = n_threads, nu = 8L, N_smooth_final = 100L,
+      smoother = "Fearnhead_O_N", eps = 1e-4), 
+    trace = 1L)
+}, "_state_rng_inter")
+```
+
+Take more iterations
+
+```{r xtra_state_full_rng_inter, cache = 1, dependson = "state_full_rng_inter"}
+set.seed(seed)   
+log_n_eval({
+  state_rng_inter_xtra <- take_xtra(
+    state_rng_inter, n_max = 150L, N_fw_n_bw = 500L, N_smooth = 2000L, N_smooth_final = 250L,
+    N_first = 2500L, trace = 1L)
+}, "_state_rng_inter_xtra")
+```
+
+<!-- 
+  knitr::opts_knit$set(output.dir = ".")
+  knitr::load_cache(
+      "xtra_xtra_state_full_rng_inter", 
+      path = paste0(file.path("markdown", "cache", "rng-effects"), 
+                    .Platform$file.sep))
+-->
+
+```{r xtra_xtra_state_full_rng_inter, cache = 1, dependson = "xtra_state_full_rng_inter"}
+set.seed(seed)   
+log_n_eval({
+  state_rng_inter_xtra <- take_xtra(
+    state_rng_inter_xtra, n_max = 50L, N_fw_n_bw = 1000L, N_smooth = 5000L, 
+    N_smooth_final = 300L, N_first = 2500L, trace = 1L)
+}, "_state_rng_inter_xtra_xtra")
+```
+
+<!-- 
+  knitr::opts_knit$set(output.dir = ".")
+  knitr::load_cache(
+      "xtra_n_more_state_full_rng_inter", 
+      path = paste0(file.path("markdown", "cache", "rng-effects"), 
+                    .Platform$file.sep))
+--> 
+
+```{r xtra_n_more_state_full_rng_inter, cache = 1, dependson = "xtra_xtra_state_full_rng_inter"}
+state_rng_inter_large <- take_xtra(
+  state_rng_inter_xtra, n_max = 1L, N_fw_n_bw = 5000L, N_smooth = 10000L, N_smooth_final = 2500L, 
+  N_first = 2500L)
+```
+
+</div>
+
+Check the result
+
+<div class="hideable">
+
+```{r res_state_full_rng_inter}
+#####
+# plot smoothed random effect
+get_plot_device(
+  pf_plot_effects(state_rng_inter_large, ylabs = "Intercept"), 
+  "rng-inter-smooth-state")
+
+#####
+# plot effective sample size
+plot_eff(state_rng_inter)
+plot_eff(state_rng_inter_xtra)
+plot_eff(state_rng_inter_large)
+
+#####
+# plot approx log-likes
+local({
+  n <- length(state_rng_inter$log_likes) + 
+    length(state_rng_inter_xtra$log_likes)
+  with(state_rng_inter, {
+    plot(1:length(log_likes), log_likes, xlim = c(1, n), 
+         ylim = range(state_rng_inter_xtra$log_likes, log_likes))  
+  })
+  with(state_rng_inter_xtra, {
+    points((n - length(log_likes) + 1L):n, log_likes, xlim = c(1, n), pch = 16)  
+  })
+})
+plot(state_rng_inter_xtra$log_likes)
+logLik(state_rng_inter_large)
+
+##### 
+# plot estimates
+with(state_rng_inter, {
+  plot(
+    EM_ests$F ~ sqrt(EM_ests$Q), 
+    xlab = expression(sigma), ylab = expression(varphi), type = "l")
+  points(sqrt(EM_ests$Q), EM_ests$F, pch = 1)
+  })
+
+with(state_rng_inter_xtra, {
+  plot(
+    EM_ests$F ~ sqrt(EM_ests$Q), 
+    xlab = expression(sigma), ylab = expression(varphi), type = "l")
+  points(sqrt(EM_ests$Q), EM_ests$F, pch = 1)
+  })
+
+sqrt(state_rng_inter_large$Q)
+state_rng_inter_large$F
+state_rng_inter_xtra$F
+
+# do check that these names match!
+compare_fix <- function(ddfit, fname, base = base_fit){
+  dd_names <- names(ddfit$fixed_effects)
+  dd_names <- gsub("^(ddFixed\\()(.+)(\\))(\\d*|TRUE)$", "\\2\\4", dd_names)
+  cat("Check these names\n")
+  print(rbind(names(coef(base)), dd_names))
+  
+  print(co <- cbind(
+    `base fit` = coef(base),
+    `dd fit`   = ddfit$fixed_effects))
+  
+  # make html table. Start by formating
+  co[] <- sprintf("%7.4f", co)
+  
+  rn <- rownames(co)
+  rn <- gsub("(wz\\()([^\\)]+)(\\))", "\\2", rn)
+  rn[rn == "(Intercept)"] <- "Intercept"
+  is_sp <- grepl("^sp_w_c", rn)
+  rn[is_sp] <- gsub("^(sp_w_c\\()([A-z]+)(,.+)$", "\\2", rn[is_sp])
+  
+  rn[-1] <- sapply(rn[-1], get_label)
+  rn[is_sp] <- paste("Spline", rn[is_sp])
+  rownames(co) <- rn
+  co[is_sp, ] <- ""
+  co <- co[!duplicated(rn), ]
+  
+  colnames(co) <- c("Model without frailty", "Model with frailty")
+  print(co)
+  
+  # save
+  require(tableHTML)
+  fname <- file.path("markdown", "output", paste0(fname, ".html"))
+  cat("\nSaving to", sQuote(fname), "\n")
+  write_tableHTML(tableHTML(co), file = fname)
+}
+compare_fix(state_rng_inter_large, "comp-fix-inter")
+
+plot_sp_w_c <- function(term, ddfit, base = base_fit, xlab, vals_only = FALSE){
+  #####
+  # find term index
+  tt <- ddfit$terms$fixed
+  sp_tr <- which(grepl(paste0("^sp_w_c\\(", term), attr(tt, "term.labels")))
+  wz_tr <- which(grepl(paste0("^wz\\(", term), attr(tt, "term.labels")))
+  stopifnot(length(sp_tr) == 1L, length(wz_tr) == 1L)
+  
+  #####
+  # make dummy data and get model matrix
+  x_range <- quantile(eval(parse(text = term), base$data), probs = c(.01, .99))
+  x <- seq(x_range[1], x_range[2],length.out = 1000)
+  df <- data.frame(x)
+  colnames(df) <- term
+  
+  n_terms <- length(attr(tt, "term.labels"))
+  tt <- drop.terms(tt, setdiff(1:n_terms, c(wz_tr, sp_tr)))
+  attr(tt, "intercept") <- 0
+  M <- model.matrix(tt, df)
+  
+  cl <- colnames(M)
+  l1 <- drop(M %*% ddfit$fixed_effects[cl])
+  l2 <- drop(M %*% coef(base)[cl])
+  cv <- vcov(base)[cl, cl]
+  l2_se <- sqrt(diag(M %*% tcrossprod(cv, M)))
+  l2_lb <- l2 - 1.96 * l2_se 
+  l2_ub <- l2 + 1.96 * l2_se 
+  
+  if(vals_only)
+    return(list(x = x, rng = l1, base = l2, base_lb = l2_lb, 
+                base_ub = l2_ub))
+  
+  #####
+  # plot
+  plot(x, l1, type = "l", 
+       ylab = "Linear predictor term", xlab = xlab, 
+       ylim = range(l1, l2, l2_lb, l2_ub))
+  lines(x, l2, lty = 2)
+  lines(x, l2_lb, lty = 2, col = "DarkGray")
+  lines(x, l2_ub, lty = 2, col = "DarkGray")
+}
+plot_sp_w_c("sigma"   , state_rng_inter_large, xlab = get_label("sigma"))
+plot_sp_w_c("r_niq_nn", state_rng_inter_large, xlab = get_label("r_niq_nn"))
+
+##### 
+# log-likelihood and AIC approximations
+logLik(state_rng_inter_large)
+AIC(base_fit, duffie_09_xtra, state_rng_inter_large)
+```
+
+<!-- 
+  knitr::opts_knit$set(output.dir = ".")
+  knitr::load_cache(
+      "ll_state_full_rng_inter", 
+      path = paste0(file.path("markdown", "cache", "rng-effects"), 
+                    .Platform$file.sep))
+--> 
+
+```{r ll_state_full_rng_inter, cache = 1, dependson = "state_full_rng_inter_xtra"}
+# get better log-likelihood approximation
+set.seed(seed)
+print(state_rng_inter_LL <- 
+   logLik(PF_forward_filter(state_rng_inter_large, N_fw = 5000L, N_first = 10000L)), 
+   digits = 6)
+```
+
+</div>
+
+### Model with a random relative size slope
+
+Fit model
+
+<div class="hideable">
+
+<!-- 
+  knitr::opts_knit$set(output.dir = ".")
+  knitr::load_cache(
+      "w_size_state_rng", 
+      path = paste0(file.path("markdown", "cache", "rng-effects"), 
+                    .Platform$file.sep))
+--> 
+
+```{r w_size_state_rng, cache = 1, dependson = "dd_fixed"}
+set.seed(seed)
+log_n_eval({
+  state_rng_size_restrict <- PF_EM(
+    fixed = frm_fixed, random = ~ 1 + wz(rel_size),  
+    data = dat, model = "cloglog", by = 1L, max_T = max(dat$tstop), 
+    id = dat$gvkey_unique, type = "VAR",  Q_0 = diag(c(1, 2)^2),
+    
+    J = diag(1, 2), psi = log(c(0.1272, .05)),
+    G = matrix(c(1, 0, 
+                 0, 0, 
+                 0, 0, 
+                 0, 1), byrow = TRUE, ncol = 2), theta = c(.9, .9), 
+    K = matrix(1, 1, 1), phi = 0,
+    
+    control = PF_control(
+      N_fw_n_bw = 100L, N_smooth = 200L, N_first = 1000L, n_max = 100L,
+      N_smooth_final = 100L, n_threads = n_threads, nu = 8L, 
+      smoother = "Fearnhead_O_N", eps = 1e-4), 
+    trace = 1L)
+}, "_state_rng_size_restrict")
+```
+
+```{r xtra_w_size_state_rng, cache = 1, dependson = "w_size_state_rng"}
+set.seed(seed)
+log_n_eval({
+  state_rng_size_restrict_xtra <- take_xtra(
+    state_rng_size_restrict, n_max = 200L, N_fw_n_bw = 400L, N_smooth = 1000L, 
+    N_first = 1000L, trace = 1L, N_smooth_final = 200L)
+}, "_state_rng_inter_xtra_w_size_one")
+```
+
+```{r xtra_xtra_w_size_state_rng, cache = 1, dependson = "xtra_w_size_state_rng"}
+set.seed(seed)
+log_n_eval({
+  state_rng_size_restrict_xtra <- take_xtra(
+    state_rng_size_restrict_xtra, n_max = 100L, N_fw_n_bw = 1000L, N_smooth = 2500L, 
+    N_first = 1000L, trace = 1L, N_smooth_final = 200L)
+}, "_state_rng_inter_xtra_xtra_w_size_one")
+```
+
+<!-- 
+  knitr::opts_knit$set(output.dir = ".")
+  knitr::load_cache(
+      "xtra_xtra_xtra_w_size_state_rng", 
+      path = paste0(file.path("markdown", "cache", "rng-effects"), 
+                    .Platform$file.sep))
+--> 
+
+```{r xtra_xtra_xtra_w_size_state_rng, cache = 1, dependson = "xtra_xtra_w_size_state_rng"}
+set.seed(seed)
+log_n_eval({
+  state_rng_size_restrict_xtra <- take_xtra(
+    state_rng_size_restrict_xtra, n_max = 50L, N_fw_n_bw = 2000L, N_smooth = 5000L, 
+    N_first = 10000L, trace = 1L, N_smooth_final = 400L)
+}, "_state_rng_inter_xtra_xtra_xtra_w_size_one")
+```
+
+
+<!-- 
+  knitr::opts_knit$set(output.dir = ".")
+  knitr::load_cache(
+      "large_w_size_state_rng", 
+      path = paste0(file.path("markdown", "cache", "rng-effects"), 
+                    .Platform$file.sep))
+--> 
+
+```{r large_w_size_state_rng, cache = 1, dependson = "xtra_xtra_xtra_w_size_state_rng"}
+state_rng_size_restrict_large <- take_xtra(
+  state_rng_size_restrict_xtra, n_max = 1L, N_fw_n_bw = 10000L, 
+  N_smooth = 50000L, N_first = 10000L, N_smooth_final = 2000L)
+```
+
+</div>
+
+Check results
+
+<div class="hideable"> 
+
+```{r show_xtra_w_size_state_rng}
+#####
+# approx log-likelihood
+local({
+  n <- length(state_rng_size_restrict$log_likes) + 
+    length(state_rng_size_restrict_xtra$log_likes)
+  with(state_rng_size_restrict, {
+    plot(1:length(log_likes), log_likes, xlim = c(1, n), 
+         ylim = range(state_rng_size_restrict_xtra$log_likes, log_likes))  
+  })
+  with(state_rng_size_restrict_xtra, {
+    points((n - length(log_likes) + 1L):n, log_likes, xlim = c(1, n), pch = 16)  
+  })
+})
+
+plot(state_rng_size_restrict_xtra$log_likes)
+logLik(state_rng_size_restrict_large)
+
+#####
+# estimates
+state_rng_size_restrict_xtra$EM_ests
+state_rng_size_restrict_large[c("F", "Q", "theta", "psi", "phi")]
+sqrt(diag(state_rng_size_restrict_large$Q))
+cov2cor(state_rng_size_restrict_large$Q)
+state_rng_size_restrict_large$F
+
+get_plot_device(
+  pf_plot_effects(state_rng_size_restrict_large, 
+                  ylabs = c("Intercept", get_label("rel_size"))), 
+  "rng-inter-smooth-state-w-size", onefile = FALSE)
+
+compare_fix(state_rng_size_restrict_large, "comp-fix-inter-rel-size")
+
+# show T-bill rate plot due to changed slope
+local({
+  tr <- tapply(dat$r1y, dat$tstop, unique)
+  stopifnot(length(dim(tr)) == 1L)
+  ti <- make_ym_inv(as.integer(names(tr)))
+  
+  plot(ti, tr, type = "l")
+})
+
+plot_sp_w_c("sigma"   , state_rng_size_restrict_large, xlab = get_label("sigma"))
+plot_sp_w_c("r_niq_nn", state_rng_size_restrict_large, xlab = get_label("r_niq_nn"))
+
+#####
+# effective sample size and AIC
+plot_eff(state_rng_size_restrict)
+plot_eff(state_rng_size_restrict_xtra)
+plot_eff(state_rng_size_restrict_large)
+
+AIC(base_fit, duffie_09_xtra, state_rng_inter_large, 
+    state_rng_size_restrict_large)
+```
+
+```{r marg_size_effect, cache = 1}
+#####
+# get idea of marginal effect
+get_plot_device(
+  local({
+    library(mgcv)
+    library(parallel)
+    cl <- makeCluster(6L)
+    dat$wz_rel_size <- wz(dat$rel_size)
+    gam_fit <- bam(
+      y ~ ti(tstop, k = 15, bs = "cr") + 
+        ti(wz_rel_size, k = 15, bs = "cr") +
+        ti(tstop, wz_rel_size, k = c(15, 15), bs = "cr"), 
+      binomial("cloglog"), dat, cluster = cl)
+    stopCluster(cl)
+    
+    print(summary(gam_fit))
+    plot(gam_fit)
+    for(i in 0:3)
+      vis.gam(gam_fit, ticktype = "detailed", theta = -45 + 90 * i)
+    
+  }), "size-time-marg", onefile = FALSE)
+```
+
+</div>
+
+### Model with a random relative size slope -- unrestricted
+
+<div class="hideable">
+
+<!-- 
+  knitr::opts_knit$set(output.dir = ".")
+  knitr::load_cache(
+      "unrestricted_w_size_state_rng", 
+      path = paste0(file.path("markdown", "cache", "rng-effects"), 
+                    .Platform$file.sep))
+--> 
+
+```{r unrestricted_w_size_state_rng, cache = 1, dependson = "dd_fixed"}
+set.seed(seed)
+log_n_eval({
+  state_rng_size_unrestrict <- PF_EM(
+    fixed = frm_fixed, random = ~ 1 + wz(rel_size),  
+    data = dat, model = "cloglog", by = 1L, max_T = max(dat$tstop), 
+    id = dat$gvkey_unique, type = "VAR",  Q_0 = diag(c(1, 2)^2),
+    Q = matrix(c(.12, .02, .02, .06), 2), Fmat = diag(.8, 2),
+    control = PF_control(
+      N_fw_n_bw = 100L, N_smooth = 200L, N_first = 1000L, n_max = 100L,
+      N_smooth_final = 100L, n_threads = n_threads, nu = 8L, 
+      smoother = "Fearnhead_O_N", eps = 1e-4), 
+    trace = 1L)
+}, "_state_rng_size_unrestrict")
+```
+
+Take more iterations
+
+```{r xtra_unrestricted_w_size_state_rng, cache = 1, dependson = "unrestricted_w_size_state_rng"}
+set.seed(seed)   
+log_n_eval({
+  state_rng_size_unrestrict_xtra <- take_xtra(
+    state_rng_size_unrestrict, n_max = 150L, N_fw_n_bw = 200L, N_smooth = 1000L, 
+    N_smooth_final = 200L, N_first = 2500L, trace = 1L)
+}, "_state_rng_size_unrestrict_xtra")
+```
+
+<!-- 
+  knitr::opts_knit$set(output.dir = ".")
+  knitr::load_cache(
+      "xtra_unrestricted_w_size_state_rng", 
+      path = paste0(file.path("markdown", "cache", "rng-effects"), 
+                    .Platform$file.sep))
+--> 
+
+```{r xtra_xtra_unrestricted_w_size_state_rng, cache = 1, dependson = "xtra_unrestricted_w_size_state_rng"}
+set.seed(seed)   
+log_n_eval({
+  state_rng_size_unrestrict_xtra <- take_xtra(
+    state_rng_size_unrestrict_xtra, n_max = 50L, N_fw_n_bw = 500L, N_smooth = 2000L, 
+    N_smooth_final = 250L, N_first = 2500L, trace = 1L)
+}, "_state_rng_size_unrestrict_xtra_xtra")
+```
+
+<!-- 
+  knitr::opts_knit$set(output.dir = ".")
+  knitr::load_cache(
+      "large_unrestricted_w_size_state_rng", 
+      path = paste0(file.path("markdown", "cache", "rng-effects"), 
+                    .Platform$file.sep))
+--> 
+
+```{r large_unrestricted_w_size_state_rng, cache = 1, dependson = "xtra_unrestricted_w_size_state_rng"}
+state_rng_size_unrestrict_large <- take_xtra(
+  state_rng_size_unrestrict_xtra, n_max = 1L, N_fw_n_bw = 2000L, 
+  N_smooth = 10000L, N_smooth_final = 2500L, N_first = 2500L)
+```
+
+</div>
+
+Check results
+
+<div class="hideable">
+
+```{r unrestricted_show_xtra_w_size_state_rng}
+#####
+# approx log-likelihood
+local({
+  n <- length(state_rng_size_unrestrict$log_likes) + 
+    length(state_rng_size_unrestrict_xtra$log_likes)
+  with(state_rng_size_unrestrict, {
+    plot(1:length(log_likes), log_likes, xlim = c(1, n), 
+         ylim = range(state_rng_size_unrestrict_xtra$log_likes, log_likes))  
+  })
+  with(state_rng_size_unrestrict_xtra, {
+    points((n - length(log_likes) + 1L):n, log_likes, xlim = c(1, n), pch = 16)  
+  })
+})
+
+plot(state_rng_size_unrestrict_xtra$log_likes)
+logLik(state_rng_size_unrestrict_large)
+
+#####
+# estimates
+state_rng_size_unrestrict_xtra$EM_ests
+sqrt(diag(state_rng_size_unrestrict_large$Q))
+cov2cor(state_rng_size_unrestrict_large$Q)
+state_rng_size_unrestrict_large$F
+
+# compare  with 
+sqrt(diag(state_rng_size_restrict_large$Q))
+cov2cor(state_rng_size_restrict_large$Q)
+state_rng_size_restrict_large$F
+
+get_plot_device(
+  pf_plot_effects(state_rng_size_unrestrict_large, 
+                  ylabs = c("Intercept", get_label("rel_size"))), 
+  "rng-inter-smooth-state-w-size-unrestrict", onefile = FALSE)
+
+compare_fix(state_rng_size_unrestrict_large, "comp-fix-inter-rel-size-unrestrict")
+
+plot_sp_w_c("sigma"   , state_rng_size_unrestrict_large, xlab = get_label("sigma"))
+plot_sp_w_c("r_niq_nn", state_rng_size_unrestrict_large, xlab = get_label("r_niq_nn"))
+
+#####
+# effective sample size and AIC
+plot_eff(state_rng_size_unrestrict)
+plot_eff(state_rng_size_unrestrict_xtra)
+plot_eff(state_rng_size_unrestrict_large)
+
+AIC(base_fit, duffie_09_xtra, state_rng_inter_large, 
+    state_rng_size_restrict_large, state_rng_size_unrestrict_large)
+```
+
+</div>
+
+### Add random slope for net income to size
+
+<div class="hideable">
+
+<!-- 
+  knitr::opts_knit$set(output.dir = ".")
+  knitr::load_cache(
+      "restricted_w_niq_size_state_rng", 
+      path = paste0(file.path("markdown", "cache", "rng-effects"), 
+                    .Platform$file.sep))
+--> 
+
+```{r restricted_w_niq_size_state_rng, cache = 1, dependson = "dd_fixed"}
+set.seed(seed)
+log_n_eval({
+  state_rng_niq_size_restrict <- PF_EM(
+    fixed = frm_fixed, random = ~ 1 + wz(rel_size) + wz(r_niq_nn),  
+    data = dat, model = "cloglog", by = 1L, max_T = max(dat$tstop), 
+    id = dat$gvkey_unique, type = "VAR",  Q_0 = diag(1, 3),
+    
+    J = diag(1, 3), psi = log(c(0.1272, .05, .1)),
+    G = matrix(c(1, 0, 0,
+                 0, 0, 0,
+                 0, 0, 0,
+                 0, 0, 0,
+                 0, 1, 0,
+                 0, 0, 0,
+                 0, 0, 0, 
+                 0, 0, 0,
+                 0, 0, 1), byrow = TRUE, ncol = 3), theta = c(.9, .9, .1), 
+    K = diag(3), phi = c(2.95, 0, 0),
+    
+    control = PF_control(
+      N_fw_n_bw = 200L, N_smooth = 500L, N_first = 1000L, n_max = 100L,
+      N_smooth_final = 100L, n_threads = n_threads, nu = 8L, 
+      smoother = "Fearnhead_O_N", eps = 1e-4), 
+    trace = 1L)
+}, "_state_rng_niq_size_restrict")
+```
+
+Take more iterations
+
+<!--
+  knitr::opts_knit$set(output.dir = ".")
+  knitr::load_cache(
+      "xtra_restricted_w_niq_size_state_rng", 
+      path = paste0(file.path("markdown", "cache", "rng-effects"), 
+                    .Platform$file.sep))
+-->
+
+```{r xtra_restricted_w_niq_size_state_rng, cache = 1, dependson = "restricted_w_niq_size_state_rng"}
+set.seed(seed)   
+log_n_eval({
+  state_rng_niq_size_restrict_xtra <- take_xtra(
+    state_rng_niq_size_restrict, n_max = 250L, N_fw_n_bw = 500L, N_smooth = 1000L, 
+    N_smooth_final = 200L, N_first = 2500L, trace = 1L)
+}, "_state_rng_niq_size_restrict_xtra")
+```
+
+```{r xtra_xtra_restricted_w_niq_size_state_rng, cache = 1, dependson = "xtra_restricted_w_niq_size_state_rng"}
+set.seed(seed)   
+log_n_eval({
+  state_rng_niq_size_restrict_xtra <- take_xtra(
+    state_rng_niq_size_restrict_xtra, n_max = 50L, N_fw_n_bw = 500L, N_smooth = 2000L, 
+    N_smooth_final = 250L, N_first = 2500L, trace = 1L)
+}, "_state_rng_niq_size_restrict_xtra_xtra")
+```
+
+```{r xtra_xtra_xtra_restricted_w_niq_size_state_rng, cache = 1, dependson = "xtra_xtra_restricted_w_niq_size_state_rng"}
+set.seed(seed)   
+log_n_eval({
+  state_rng_niq_size_restrict_xtra <- take_xtra(
+    state_rng_niq_size_restrict_xtra, n_max = 50L, N_fw_n_bw = 1000L, N_smooth = 4000L, 
+    N_smooth_final = 300L, N_first = 10000L, trace = 1L)
+}, "_state_rng_niq_size_restrict_xtra_xtra_xtra")
+```
+
+<!--
+  knitr::opts_knit$set(output.dir = ".")
+  knitr::load_cache(
+      "large_restricted_w_niq_size_state_rng", 
+      path = paste0(file.path("markdown", "cache", "rng-effects"), 
+                    .Platform$file.sep))
+-->
+
+```{r large_restricted_w_niq_size_state_rng, cache = 1, dependson = "xtra_xtra_xtra_restricted_w_niq_size_state_rng"}
+state_rng_niq_size_restrict_large <- take_xtra(
+  state_rng_niq_size_restrict_xtra, n_max = 1L, N_fw_n_bw = 2000L, 
+  N_smooth = 10000L, N_smooth_final = 2500L, N_first = 2500L)
+```
+
+</div>
+
+Check results
+
+<div class="hideable">
+
+```{r show_restricted_w_niq_size_state_rng}
+#####
+# approx log-likelihood
+local({
+  n <- length(state_rng_niq_size_restrict$log_likes) + 
+    length(state_rng_niq_size_restrict_xtra$log_likes)
+  with(state_rng_niq_size_restrict, {
+    plot(1:length(log_likes), log_likes, xlim = c(1, n), 
+         ylim = range(state_rng_niq_size_restrict_xtra$log_likes, log_likes))  
+  })
+  with(state_rng_niq_size_restrict_xtra, {
+    points((n - length(log_likes) + 1L):n, log_likes, xlim = c(1, n), pch = 16)  
+  })
+})
+
+plot(state_rng_niq_size_restrict_xtra$log_likes)
+logLik(state_rng_size_unrestrict_large)
+
+#####
+# estimates
+state_rng_niq_size_restrict_xtra$EM_ests
+sqrt(diag(state_rng_niq_size_restrict_large$Q))
+cov2cor(state_rng_niq_size_restrict_large$Q)
+state_rng_niq_size_restrict_large$F
+
+# compare  with 
+sqrt(diag(state_rng_size_restrict_large$Q))
+cov2cor(state_rng_size_restrict_large$Q)
+state_rng_size_restrict_large$F
+
+get_plot_device(
+  pf_plot_effects(state_rng_niq_size_restrict_large, 
+                  ylabs = c("Intercept", get_label("rel_size"), 
+                            get_label("r_niq_nn"))), 
+  "rng-inter-smooth-state-w-niq-size-unrestrict", onefile = FALSE)
+
+compare_fix(state_rng_niq_size_restrict_large, "comp-fix-inter-niq-rel-size-unrestrict")
+
+plot_sp_w_c("sigma"   , state_rng_niq_size_restrict_large, xlab = get_label("sigma"))
+plot_sp_w_c("r_niq_nn", state_rng_niq_size_restrict_large, xlab = get_label("r_niq_nn"))
+
+#####
+# effective sample size and AIC
+plot_eff(state_rng_niq_size_restrict)
+plot_eff(state_rng_niq_size_restrict_xtra)
+plot_eff(state_rng_size_unrestrict_large)
+
+AIC(base_fit, duffie_09_xtra, state_rng_inter_large, 
+    state_rng_size_restrict_large, state_rng_size_unrestrict_large, 
+    state_rng_niq_size_restrict_large)
+```
+
+</div>
+
+## Create estimates table
+
+<div class="hideable">
+
+```{r create_coef_table}
+local({
+  #####
+  # get the input we need
+  stopifnot(isTRUE(all.equal(
+    names(state_rng_inter_large$fixed_effects), 
+    names(state_rng_size_restrict_large$fixed_effects))))
+  betas <- cbind(state_rng_inter_large$fixed_effects, 
+                 state_rng_size_restrict_large$fixed_effects)
+  
+  labs <- attr(state_rng_inter_large$terms$fixed, "term.labels")
+  labs <- c("(Intercept)", labs)
+  
+  # re-order terms
+  assg <- 
+    attr(model.matrix(state_rng_inter_large$terms$fixed, dat), "assign") + 1L
+  
+  frm_ord <- # we will use this order
+    ~ wz(dtd) + wz(excess_ret) + log_market_ret + r1y + wz(r_wcapq_nn) + 
+    wz(r_oiadpq_nn) + wz(r_mv_ltq) + wz(r_niq_nn) + wz(r_ltq_nn) + 
+    wz(r_actq_lctq) + wz(sigma) + wz(rel_size) + sp_w_c(r_niq_nn, 4) + 
+    sp_w_c(sigma, 4, knots = .04) + wz(r_actq_lctq):wz(sigma)
+  o <- c("(Intercept)", attr(terms(model.frame(frm_ord, dat)), "term.labels"))
+  stopifnot(setequal(o, labs))
+  i_new <- match(o, labs)
+  i_new <- unlist(sapply(i_new, function(x) which(assg == x)))
+  betas <- betas[i_new, ]
+  assg <- assg[i_new]
+  labs <- o
+  
+  do_drop <- duplicated(assg)
+  
+  betas # print before
+  betas <- betas[!do_drop, ]
+  rownames(betas) <- labs
+  betas # print after
+  
+  # blank those out with more than one term
+  betas[table(assg) > 1L, ] <- NA_real_
+  
+  theta <- matrix(NA_real_, 2, 2)
+  theta[1, 1] <- state_rng_inter_large$F
+  theta[, 2]  <- diag(state_rng_size_restrict_large$F)
+  
+  sds <- matrix(NA_real_, 2, 2)
+  sds[1, 1] <- sqrt(state_rng_inter_large$Q)
+  sds[, 2]  <- sqrt(diag(state_rng_size_restrict_large$Q))
+  
+  cors <- matrix(NA_real_, 1, 2)
+  cors[, 2] <- cov2cor(state_rng_size_restrict_large$Q)[1, 2]
+  
+  rest <- sapply(list(state_rng_inter_large, state_rng_size_restrict_large), 
+                 function(x) c(AIC(x), logLik(x), length(unique(dat$gvkey))))
+  row.names(rest) <- c("AIC", "log-likelihood", "# firms")
+  
+  #####
+  # make table
+  t_arg <- "S[table-format=-1.3,table-space-text-pre={*}]"
+  cmark <- "{\\makecell[r]{\\checkmark}}"
+  
+  nm <- 2L
+  cat(
+    "\\begin{tabular}{l\n", paste0(rep(t_arg, nm), collapse = "\n"), "}\n",
+    sep = "", "\\toprule\n", 
+    "& ", paste0("\\multicolumn{1}{c}{(", 
+                 tolower(as.roman(1:nm)), ")}", collapse = " & "), "\\\\\n", 
+    "\\midrule\n")
+  
+  # fixed effect coefficients
+  for(i in 1:nrow(betas)){
+    # row name
+    na <- rownames(betas)[i]
+    na <- if(na == "(Intercept)") "Intercept" else {
+      na <- gsub(
+        "(wz\\()([a-zA-Z0-9_]+)(,.+|\\))", "\\2", na, perl = TRUE)
+      regexp <- "(sp_w_c\\()([a-zA-Z0-9_]+)(,.+|\\))"
+      is_spline <- grepl(regexp, na, perl = TRUE)
+      na <- gsub(regexp, "\\2", na, perl = TRUE)
+      
+      if(is_spline) 
+        paste0(get_label(na), " (spline)") else 
+          get_label(na)
+    }
+    
+    cat(na, "& ")
+    z <- betas[i, ]
+    cat(paste0(
+      ifelse(is.na(z), cmark, sprintf("%.3f", z)), collapse = " & "), 
+      "\\\\\n")
+  }
+  cat("\\midrule\n")
+  
+  # parameters related to frailty model
+  fra_params <- rbind(theta, sds, cors)
+  stopifnot(nrow(cors) == 1L)
+  rownames(fra_params) <- c(
+    paste0("$\\theta_{", 1:nrow(theta), "}$"),
+    paste0("$\\sigma_{", 1:nrow(sds), "}$"), 
+    "$\\rho$")
+  
+  for(i in 1:nrow(fra_params)){
+    z <- fra_params[i, ]
+    cat(rownames(fra_params)[i], "&", paste0(
+      ifelse(is.na(z), "", sprintf("%.3f", z)), collapse = " & "), 
+      "\\\\\n")
+  }
+  cat("\\midrule\n")
+  
+  # summary stats
+  cat("AIC", "&", paste0(
+    sprintf("%.1f", rest["AIC", ]) , collapse = " & "), "\\\\\n")
+  cat("log-likelihood", "&", paste0(
+    sprintf("%.1f", rest["log-likelihood", ]) , collapse = " & "), "\\\\\n")
+  
+  cat("Number of firms", "&", paste0(
+    sprintf("%d", rest["# firms", ]) , collapse = " & "), "\\\\\n")
+  
+  cat("\\bottomrule\n\\end{tabular}")
+})
+```
+
+</div>
+
+## Plot splines
+
+<div class="hideable">
+
+```{r plot_splines}
+get_plot_device({
+  x1 <- plot_sp_w_c("sigma", state_rng_size_restrict_large, vals_only = TRUE)
+  x2 <- plot_sp_w_c("sigma", state_rng_inter_large, vals_only = TRUE)
+  matplot(
+    x1$x, cbind(x1$base, x1$rng, x2$rng, x1$base_lb, x1$base_ub), 
+    lty = c(3, 1, 2, 3, 3), col = "black", 
+    type = "l", xlab = get_label("sigma"), ylab = "Log-hazard term")
+  
+  x1 <- plot_sp_w_c("r_niq_nn", state_rng_size_restrict_large, vals_only = TRUE)
+  x2 <- plot_sp_w_c("r_niq_nn", state_rng_inter_large, vals_only = TRUE)
+  matplot(
+    x1$x, cbind(x1$base, x1$rng, x2$rng, x1$base_lb, x1$base_ub), 
+    lty = c(3, 1, 2, 3, 3), col = "black", 
+    type = "l", xlab = get_label("r_niq_nn"), ylab = "Log-hazard term")
+}, "splines-rng-monthly", onefile = FALSE)
+```
+
+</div>
+
+
+## References

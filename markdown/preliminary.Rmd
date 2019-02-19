@@ -1,0 +1,1270 @@
+---
+title: "Model without random effects"
+author: 
+- Rastin Matin
+- Benjamin Christoffersen 
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:  
+  html_document:
+    toc: true
+bibliography: refs.bib
+nocite: | 
+  @Chava04, @Lando13
+---
+
+<script>
+$(document).ready(function(){
+  var hide_divs = $("div.hideable");
+  hide_divs.each(function(){
+    // Wrap content in div
+    $(this).wrapInner( "<div class='hideable_content', style='display: none;'></div>");
+    
+    // Add button
+    $(this).prepend("<button id='toogle'>show</button>");
+  });
+  
+  // Add hideable btn
+  // Put the rest in a div
+  
+  $("div.hideable button#toogle").click(function(){
+    var parent = $(this).parent();
+    var target_div = $(parent).find("div.hideable_content");
+    
+    if(target_div.css("display") == "none"){
+      target_div.show();
+        $(this).text("Hide");
+    } else {
+      target_div.hide();
+      $(this).text("Show");
+    }
+  });
+});
+</script>
+
+## Load data
+
+```{r static_setup, include=FALSE, cache=FALSE}
+# please do not set options here that could change...
+knitr::opts_chunk$set(
+  cache.path = 
+    paste0(file.path("cache", "preliminary"), .Platform$file.sep), 
+  fig.path = 
+    paste0(file.path("fig"  , "preliminary"), .Platform$file.sep))
+```
+
+```{r def_data_files}
+# assign file names
+fs <- list(
+  dat          = file.path("data", "final.RDS"), 
+  regres_funcs = file.path("R", "regres_funcs.R"))
+```
+
+```{r check_rebuild, echo = FALSE, cache = TRUE, cache.extra = tools::md5sum(unlist(fs))}
+# see https://stackoverflow.com/a/52163751/5861244
+knitr::opts_chunk$set(cache.rebuild = TRUE)
+```
+
+```{r setup, include=FALSE, cache=FALSE}
+# please do set options here that could change...
+knitr::opts_chunk$set(
+  echo = TRUE, fig.height = 4, fig.width = 7, dpi = 72, comment = "#R", 
+  error = FALSE)
+options(digits = 4, scipen = 10, width = 90)
+```
+
+Source script with the R functions we need 
+
+<div class="hideable">
+
+```{r source_r_funcs}
+source(fs$regres_funcs, echo = TRUE, max.deparse.length = 5000)
+source(file.path("R", "get_plot_device.R"), echo = TRUE, 
+       max.deparse.length = 5000)
+source(file.path("R", "get_label.R"), echo = TRUE, 
+       max.deparse.length = 5000)
+source(file.path("R", "diagnostics.R"), echo = TRUE, 
+       max.deparse.length = 5000)
+source(file.path("R", "cycles.R"), echo = TRUE, 
+       max.deparse.length = 5000)
+
+# change default
+formals(wz)$do_center <- TRUE
+```
+
+</div>
+
+Load the data
+
+```{r load_dat}
+tmp <- readRDS(fs$dat)
+dat <- tmp$data
+make_ym <- tmp$ym_funcs$make_ym
+make_ym_inv <- tmp$ym_funcs$make_ym_inv
+
+# the branch and commit id the data set was made with 
+tmp$git_info
+rm(tmp)
+```
+
+Show some properties and prepare data
+
+<div class="hideable">
+
+```{r show_prop}
+# exclude firms before they are first rated or after they stop being rated
+(o <- with(dat, table(
+  y,
+  `before first rating date` = tstart < start_rated_ym, 
+  `after last rating date`   = tstop  > stop_rated_ym,
+  useNA = "ifany")))
+round(prop.table(o, margin = 2:3), 5)
+
+table(dat$y)
+dat <- subset(dat, !is.na(start_rated_ym) & tstart >= start_rated_ym)
+table(dat$y)
+dat <- subset(dat, tstop <= stop_rated_ym) 
+table(dat$y)
+
+# starts and ends dates
+make_ym_inv(min(dat$tstart))
+make_ym_inv(max(dat$tstop))
+
+# tstop of last event. We assume this is the most recent data from Moodys
+max_is_ev <- with(subset(dat, y == TRUE), max(tstop))
+make_ym_inv(max_is_ev)
+dat <- subset(dat, tstop <= max_is_ev)
+
+# max time between stop time and event. Most happen in the same month of the
+# observations. Thus, we may miss only a few events in the end of the sample
+table(with(subset(dat, y), distress_time - tstop))
+
+# we assume that a macro avariable is included to all such that each 
+# row represents one month. Otherwise we need to change in the rest of 
+# this file...
+stopifnot(all(dat$stop - dat$start == 1))
+
+#####
+# plot size of risk set and distress rate through time
+ns <- tapply(dat$y, dat$tstop, length)
+ti <- as.integer(names(ns))
+ti <- make_ym_inv(as.integer(ti + sign(ti) * 1e-2))
+
+# number of observations by date
+plot(ns ~ ti, type = "l", ylim = range(ns, 0), 
+     ylab = "Number of observations", xlab = "Time")
+
+# distress rate by date
+get_plot_device({
+  n_distress <- tapply(dat$y, dat$tstop, sum)
+  plot(n_distress / ns ~ ti, type = "h", xlab = "Time", ylab = "Distress rate")
+  lines(smooth.spline(ti, n_distress/ns), lwd = 2, col = "DarkGreen")
+}, "def_w_smooth")
+
+#####
+# remove observations with missing data
+vars <- c("r_wcapq_atq", "r_req_atq", "r_oiadpq_atq", "r_mv_ltq",
+          "r_saleq_atq", "r_niq_atq", "r_ltq_atq", "r_actq_lctq", "sigma",
+          "excess_ret", "rel_size")
+
+# check cor
+local({
+  tmp <- cor(dat[, c(vars, "dtd")], use = "pairwise.complete.obs")
+  tmp[abs(tmp) < 0.3] <- NA_real_
+  tmp[upper.tri(tmp, diag = TRUE)] <- NA_real_
+  print(tmp[-1, ], na.print = "")
+  
+  cat("\n\nWinsorized\n")
+  tmp <- cor(dat[, c(vars, "dtd")], use = "pairwise.complete.obs")
+  tmp <- apply(tmp, 2, wz)
+  tmp[abs(tmp) < 0.3] <- NA_real_
+  tmp[upper.tri(tmp, diag = TRUE)] <- NA_real_
+  print(tmp[-1, ], na.print = "")
+})
+
+# keep only complete case
+nrow(dat)
+dat <- dat[complete.cases(dat[, vars]), ]
+nrow(dat)
+
+# redo-distress rate plot 
+get_plot_device({
+  tmp <- tapply(dat$y, dat$tstop, mean)
+  ti <- make_ym_inv(as.integer(names(tmp)))
+  plot(tmp ~ ti, type = "h", xlab = "Time", ylab = "Distress rate")
+  lines(smooth.spline(ti, tmp), lwd = 2, col = "DarkGreen")
+}, "def_w_smooth_redo")
+```
+
+Make distress plot with GAM model
+
+```{r distress_plot_gam, cache = 1}
+get_plot_device(
+  local({
+    tp <- tapply(dat$y, dat$tstop, mean)
+    ti <- make_ym_inv(as.integer(names(tp)))
+    plot(tp ~ ti, type = "h", xlab = "Time", ylab = "Default rate", yaxs = "i", 
+         ylim = c(0, max(tp) * 1.04))
+    nber_poly(is_dates = TRUE)
+    
+    tb <- xtabs(~ tstop + y, dat)
+    tb <- tb[, c("TRUE", "FALSE")]
+    ti <- as.integer(rownames(tb))
+    library(mgcv)
+    fi <- bam(tb ~ s(ti, k = 30, bs = "cr"), binomial())
+    pe <- predict(fi, type = "response")
+    lines(make_ym_inv(ti), pe, lwd = 2, col = "DarkBlue")
+  }), "def_w_smooth_redo-gam") 
+```
+
+</div>
+
+Create summary statistics table
+
+<div class="hideable">
+
+```{r sum_stats}
+local({
+  frm_vars <- 
+    ~ wz(dtd) + wz(excess_ret) + wz(r_wcapq_nn) + wz(r_oiadpq_nn) + 
+    wz(r_mv_ltq) + wz(r_niq_nn) + wz(r_ltq_nn) + wz(r_actq_lctq) + wz(sigma) + 
+    wz(rel_size) - 1
+  
+  mm <- model.matrix(frm_vars, dat)
+  vs <- all.vars(frm_vars)
+  labs <- sapply(vs, get_label)
+  
+  ss <- t(apply(mm, 2, function(x){
+    qs <- quantile(x, c(.01, .99))
+    x <- pmin(pmax(x, qs[1]), qs[2])
+    c(mean = mean(x), median = median(x), `standard deviation` = sd(x),  
+      `1% quantile` = qs[1], `99% quantile` = qs[2])
+  }))
+  print(ss) # to check the result
+  ss <- structure(sprintf("%.3f", ss), .Dim = dim(ss), .Dimnames = 
+                    dimnames(ss))
+  
+  cat("\\begin{tabular}{lrrrrr}\n",
+      "\\toprule",
+      "& Mean & Median & Standard deviation & 1\\% & 99\\%",
+      "\\\\\n\\midrule\n")
+  for(i in 1:nrow(ss))
+    cat(labs[i], "&", paste0(ss[i, ], collapse = " & "), "\\\\\n")
+  cat("\\bottomrule\n\\end{tabular}")
+})
+```
+
+</div>
+
+Fit models with only linear association on the linear predictor scale
+
+<div class="hideable">
+
+```{r check_rebuild_extra, include = FALSE}
+if(!interactive()){
+  .check_before_merge <- file.path("markdown", "cache", "preliminary_check")
+  if(!file.exists(.check_before_merge)){
+    knitr::opts_chunk$set(cache.rebuild = TRUE)
+  } else
+    knitr::opts_chunk$set(
+      cache.rebuild = knitr::opts_chunk$get("cache.rebuild") ||
+        !readRDS(.check_before_merge) == digest::digest(dat))
+  
+  saveRDS(digest::digest(dat), .check_before_merge)
+}
+```
+
+<!-- 
+  knitr::opts_knit$set(output.dir = ".")
+  knitr::load_cache(
+      "winz", 
+      path = paste0(file.path("markdown", "cache", "preliminary"), 
+                    .Platform$file.sep))
+-->
+
+```{r winz, cache = 1}
+######
+# fit winsorized model
+f1 <- glm(
+  y ~ wz(r_wcapq_atq) + wz(r_req_atq) + 
+  wz(r_oiadpq_atq) + wz(r_mv_ltq) + wz(r_saleq_atq) + wz(r_niq_atq) + 
+  wz(r_ltq_atq) + wz(r_actq_lctq) + wz(sigma) + 
+  wz(excess_ret) + wz(rel_size), binomial("cloglog"), dat)
+summary(f1)
+AIC(f1)
+
+#####
+# what if we winsorize at another level?
+pr <- c(.025, .975)
+f2 <- glm(y ~  wz(r_wcapq_atq, pr) + wz(r_req_atq, pr) + 
+  wz(r_oiadpq_atq, pr) + wz(r_mv_ltq, pr) + wz(r_saleq_atq, pr) + 
+  wz(r_niq_atq, pr) + wz(r_ltq_atq, pr) + wz(r_actq_lctq, pr) + 
+  wz(sigma, pr) + wz(excess_ret, pr) + wz(rel_size, pr), 
+  binomial("cloglog"), dat)
+summary(f2)
+AIC(f1, f2)
+
+#####
+# what if we use another numerator instead of total assets? As of this 
+# writing, this is 50% of the market value and 50% of the total assets
+f3 <- glm(
+  y ~ wz(r_wcapq_nn) + wz(r_req_nn) + 
+  wz(r_oiadpq_nn) + wz(r_mv_ltq) + wz(r_saleq_nn) + wz(r_niq_nn) + 
+  wz(r_ltq_nn) + wz(r_actq_lctq) + wz(sigma) + 
+  wz(excess_ret) + wz(rel_size), binomial("cloglog"), dat)
+summary(f3)
+AIC(f1, f2, f3)
+
+#####
+# what if we add distance-to-default to this model
+f4 <- update(f3, . ~ . + wz(dtd))
+summary(f4)
+AIC(f1, f2, f3, f4)
+
+#####
+# what if we add macro variables
+f5 <- update(f4, . ~ . + log_market_ret + r1y)
+summary(f5)
+AIC(f1, f2, f3, f4, f5)
+
+#####
+# what if we add a `has prior distress` dummy?
+f6 <- update(f5, . ~ . + has_prior_distress)
+summary(f6)
+AIC(f1, f2, f3, f4, f5, f6)
+
+# we will drop it again... It may be low in the start due to the length of
+# the Moody's data
+local({
+  tmp <- tapply(dat$has_prior_distress, dat$tstop, mean)
+  plot(make_ym_inv(as.integer(names(tmp))), tmp, type = "l", 
+       ylim = range(0, tmp), xlab = "Date", 
+       ylab = "Fraction with prior distress")
+})
+
+#####
+# what about the industry dummies from Chava et al. (2004)
+dat$sic_grp <- relevel(factor(dat$sic_grp), "Misc") # use same reference point
+f7 <- update(f6, . ~ . + sic_grp - has_prior_distress)
+summary(f7)
+AIC(f1, f2, f3, f4, f5, f6, f7)
+
+#####
+# what about the interactions Chava et al. (2004) argues for
+f8 <- update(f7, . ~ . + sic_grp:(wz(r_niq_nn) + wz(r_ltq_nn)))
+summary(f8)
+
+# is it significant?
+anova(f5, f7, f8, test = "LRT")
+AIC(f1, f2, f3, f4, f5, f6, f7, f8)
+
+# we remove these for now
+f9 <- update(f8, . ~ . - sic_grp:(wz(r_niq_nn) + wz(r_ltq_nn)) - sic_grp)
+summary(f9)
+AIC(f1, f2, f3, f4, f5, f6, f7, f8, f9)
+
+#####
+# simplify
+f10 <- update(f9, . ~ . - wz(r_req_nn) - wz(r_saleq_nn))
+summary(f10)
+AIC(f1, f2, f3, f4, f5, f6, f7, f8, f9, f10)
+
+# keep the last model 
+f0 <- f10
+rm(f1, f2, f3, f4, f5, f6, f7, f8, f9, f10)
+```
+
+</div>
+
+Progressive build model which is easier to follow
+
+<div class="hideable">
+
+```{r more_simple_build, cache = 1}
+frm <- y ~ wz(r_wcapq_atq) + wz(r_req_atq) + 
+  wz(r_oiadpq_atq) + wz(r_mv_ltq) + wz(r_saleq_atq) + wz(r_niq_atq) + 
+  wz(r_ltq_atq) + wz(r_actq_lctq) + wz(sigma) + 
+  wz(excess_ret) + wz(rel_size)
+
+# nice string to use for the included variables
+local({
+  vs <- all.vars(frm)
+  vs <- vs[!vs %in% "y"]
+  cat(paste0(" * ", sapply(vs, get_label), collapse = "\n"))
+})
+
+# fit models
+`size denom` <- glm(frm, binomial("cloglog"), dat)
+summary(`size denom`)
+
+frm <- y ~ wz(r_wcapq_nn) + wz(r_req_nn) + 
+  wz(r_oiadpq_nn) + wz(r_mv_ltq) + wz(r_saleq_nn) + wz(r_niq_nn) + 
+  wz(r_ltq_nn) + wz(r_actq_lctq) + wz(sigma) + 
+  wz(excess_ret) + wz(rel_size)
+`new denom` <- glm(frm, binomial("cloglog"), dat)
+summary(`new denom`)
+
+`add DtD` <- update(`new denom`, . ~ . + wz(dtd))
+summary(`add DtD`)
+
+`add macro` <- update(`add DtD`, . ~ . + log_market_ret + r1y)
+summary(`add macro`)
+
+`simplify mod` <- update(
+  `add macro`, . ~ . - wz(r_req_nn) - wz(r_saleq_nn))
+stopifnot(logLik(`simplify mod`) == logLik(f0))
+
+(aic_tab <- 
+    AIC(`size denom`, `new denom`, `add DtD`, `add macro`, `simplify mod`))
+rm(`size denom`, `new denom`, `add DtD`, `add macro`, `simplify mod`)
+```
+
+```{r more_simple_build_get_html_tab}
+library(tableHTML)
+aic_tab[, 2] <- round(aic_tab[, 2], digits = 2)
+write_tableHTML(
+  tableHTML(aic_tab), file = file.path(
+    "markdown", "output", "glm-aic-tab.html"))
+```
+
+</div>
+
+We can also directly compare with the models @Shumway01 shows result for 
+(as of this writing we do not have the age since listing). Keep in mind 
+that he
+
+ 1. uses annual and not monthly data. 
+ 2. has a different default definition. 
+ 3. uses a different market index. Though, it should not matter much as we 
+    both use a value weighted index as of this writting.
+ 4. uses $\sigma$ variable is based on monthly and not daily data.
+ 5. has only AMEX and NYSE firms.
+ 6. It is another overlapping time period.
+ 7. He cumulates returns whereas we use annualized average log monthly return. 
+ 
+<div class="hideable">
+
+```{r shum_mods, cache = 1}
+#####
+# Table 2 on page 117. His results are
+#  WC/TA   (r_wcapq_atq)  negative insignificant
+#  RE/TA   (r_req_atq)    negative insignificant
+#  EBIT/TA (r_oiadpq_atq) negative significant
+#  ME/TL   (r_mv_ltq)     negative significant
+#  S/TA    (r_saleq_atq)  postive  insignificant
+s1 <- glm(
+  y ~ wz(r_wcapq_atq) + wz(r_req_atq) + wz(r_oiadpq_atq) + wz(r_mv_ltq) + 
+    wz(r_saleq_atq), 
+  binomial("cloglog"), dat) 
+summary(s1)
+
+#####
+# Table 4 on page 119. His results are
+#  NI/TA (r_niq_atq)   negative significant
+#  TL/TA (r_ltq_atq)   postive  significant
+#  CA/CL (r_actq_lctq) negative insignificant
+s2 <- glm(
+  y ~ wz(r_niq_atq) + wz(r_ltq_atq) + wz(r_actq_lctq), 
+  binomial("cloglog"), dat) 
+summary(s2)
+
+#####
+# Table 6 on page 122. His results are
+#  NI/TA         (r_niq_atq)  negative insignificant
+#  TL/TA         (r_ltq_atq)  postive  significant
+#  Relative size (rel_size)   negative significant
+#  Excess return (excess_ret) negative significant
+#  Sigma         (sigma)      postive  insignificant
+s3 <- glm(
+  y ~ wz(r_niq_atq) + wz(r_ltq_atq) + wz(rel_size) + wz(excess_ret) + 
+    wz(sigma), 
+  binomial("cloglog"), dat) 
+summary(s3)
+
+AIC(s1, s2, s3, f0)
+rm(s1, s2, s3)
+```
+
+</div>
+
+## Standardized coefs
+Look at standardized coeffcients
+
+<div class="hideable">
+
+```{r check_std_coef}
+local({
+  fr <- y ~ 
+    wz(r_ltq_nn, do_scale = TRUE) + wz(r_niq_nn, do_scale = TRUE) + 
+    wz(r_actq_lctq, do_scale = TRUE) + wz(sigma, do_scale = TRUE) + 
+    wz(excess_ret, do_scale = TRUE) + wz(rel_size, do_scale = TRUE) +
+    wz(dtd, do_scale = TRUE) + scale(r1y) + 
+    wz(r_oiadpq_nn, do_scale = TRUE) + wz(r_mv_ltq, do_scale = TRUE) + 
+    scale(log_market_ret) + wz(r_wcapq_nn, do_scale = TRUE)
+  stopifnot(setequal(all.vars(fr), all.vars(formula(f0))))
+  fit <- glm(fr, binomial("cloglog"), dat)
+  stopifnot(AIC(fit) == AIC(f0))
+  print(su <- summary(fit))
+  coe <- su$coefficients
+  print(coe[order(abs(coe[, 1]), decreasing = TRUE), ])
+  
+  nam <- gsub(
+    "^((wz|scale)\\()([a-zA-Z0-9_]+)(,.+|\\))$", "\\3", rownames(coe), perl = TRUE)
+  nam[-1] <- sapply(nam[-1], get_label)
+  nam[1] <- "Intercept"
+  
+  rownames(coe) <- nam
+  coe <- coe[, c("Estimate", "z value")]
+  colnames(coe)[2] <- "Z-stat"
+  
+  # order by abs size
+  coe <- coe[order(abs(coe[, 1]), decreasing = TRUE), ]
+  coe[] <- sprintf("% 7.3f", coe)
+  
+  write_tableHTML(
+    tableHTML(coe), file = file.path(
+      "markdown", "output", "glm-std-coef.html"))
+  
+  print(coe, quote = FALSE)
+})
+```
+
+</div>
+
+## Variance inflation factor
+
+```{r vif}
+library(car)
+vif(f0)
+```
+
+## Residual diagnostics
+
+Look at partial residuals versus the linear predictor and the covariates 
+(these may not be approiate when the mean is lower than 0.1)
+
+<div class="hideable">
+
+```{r res_diag, cache = 1}
+pear_vs_res(f0)
+
+formals(resid_vs_covar)$type <- "partial"
+make_resid_vs_covar_plot <- function(fit){
+  vars <- attr(terms(fit), "dataClasses")
+  keep <- which(vars %in% "numeric")
+  vars <- as.list(attr(terms(fit), "variables"))[keep + 1L]
+  
+  for(v in vars)
+    eval(bquote(resid_vs_covar(fit, .(v))))
+}
+make_resid_vs_covar_plot(f0)
+```
+
+</div>
+
+## Add splines
+
+<div class="hideable">
+
+<!-- 
+  knitr::opts_knit$set(output.dir = ".")
+  knitr::load_cache(
+      "splines", 
+      path = paste0(file.path("markdown", "cache", "preliminary"), 
+                    .Platform$file.sep))
+-->
+
+```{r splines, cache = 1, dependson = c("winz", "res_diag")}
+s1 <- update(f0, . ~ . + sp_w_c(r_niq_nn, 4L))
+summary(s1)
+AIC(f0, s1)
+anova(f0, s1, test = "LRT")
+
+# check how the estimated spline looks
+plot_sp_w_c(s1, "r_niq_nn", ylab = "Log-hazard term")()
+
+# add spline to sigma -- knot is only chosen as a knot closer towards zero 
+# yields a collinear basis function after weighting
+s2 <- update(s1, . ~ . + sp_w_c(sigma, 4L, knots = .04))
+summary(s2)
+AIC(f0, s1, s2)
+anova(f0, s1, s2, test = "LRT")
+
+# plot
+plot_list <- list(
+  plot_sp_w_c(s2, "r_niq_nn", ylab = "Log-hazard term"), 
+  plot_sp_w_c(s2, "sigma", ylab = "Log-hazard term"))
+get_plot_device({
+  for(i in plot_list)
+    i()
+}, "spline_plots", onefile = FALSE)
+
+# check residual plots
+make_resid_vs_covar_plot(s2)
+pear_vs_res(s2)
+
+s0 <- s2
+rm(s1, s2, plot_list)
+```
+
+</div>
+
+Are the effects similar to the marginal effects?
+
+<div class="hideable">
+
+```{r gam_mod, cache = 1}
+library(mgcv)
+local({
+  . <- function(x){
+    x <- substitute(x)
+    qs <- eval(bquote(quantile(.(x), probs = c(.01, .99))), dat)
+    qs <- as.numeric(formatC(qs, format = "g", digits = 4))
+    
+    require(parallel)
+    cl <- makeCluster(4L)
+    on.exit(stopCluster(cl))
+    
+    fit <- eval(bquote(
+      bam(y ~ s(wz(.(x), lb = .(qs[1]), ub = .(qs[2])), k = 30L, bs = "cr"), 
+          binomial("cloglog"), dat, cluster = cl)))
+    print(summary(fit))
+    
+    function(){
+      plot(fit, xlab = get_label(deparse(x)), ylab = "Linear predictor term")
+      add_hist(eval(bquote(wz(.(x))), dat))
+    }
+  }
+  plot_list <- list(.(r_niq_nn), .(sigma))
+  
+  get_plot_device({
+    for(i in plot_list)
+      i()
+  }, "marginal_spline_plots", onefile = FALSE)
+})
+```
+
+</div>
+
+Check for interactions
+
+<div class="hideable">
+
+```{r check_interact, cache = 1, dependson = "res_diag", fig.height = 8, fig.width = 8}
+#####
+# what do large residuals have in common?
+mr <- local({
+  mm <- predict(s0, type = "terms")
+  mr <- apply(mm, 2, rank)
+  res <- residuals(s0, type = "pearson")
+  mr <- mr[order(res, decreasing = TRUE), ]
+  mr <- mr / nrow(mr)
+})
+# take most extreme  
+rbind(tail = colMeans(tail(mr, 2000)), head = colMeans(head(mr, 2000)))
+
+# do plots
+vars <- list(
+  r_req_nn    = list(quote(wz(r_niq_nn))),
+  r_req_nn    = list(quote(wz(sigma))),
+  rel_size    = list(quote(wz(excess_ret))),
+  r_ltq_nn    = list(quote(wz(dtd))),
+  # due to Lando et al. (2013)
+  actq_lctq   = list(quote(wz(r_actq_lctq))))
+for(i in seq_along(vars)){
+  for(j in seq_len(length(vars) - i) + i){
+    cl <- list(
+      quote(resid_vs_covar_inter), quote(s0), vars[[i]][[1]],
+      vars[[j]][[1]], type = "partial")
+    eval(as.call(cl))
+  }
+}
+```
+
+
+</div>
+
+## Add interactions
+
+Add interactions (especially those similar to @Lando13)
+
+<div class="hideable">
+
+<!--
+  knitr::opts_knit$set(output.dir = ".")
+  knitr::load_cache(
+    "add_inter", 
+    path = paste0(file.path("markdown", "cache", "preliminary"), 
+                  .Platform$file.sep))
+-->
+
+```{r add_inter, cache = 1, dependson = "splines"}
+i1 <- update(s0, . ~ . + wz(r_actq_lctq) : wz(dtd)) 
+summary(i1)
+AIC(s0, i1)
+anova(s0, i1, test = "LRT")
+
+i2 <- update(i1, . ~ . + wz(r_niq_nn) : wz(dtd)) 
+summary(i2)
+AIC(s0, i1, i2)
+anova(s0, i1, i2, test = "LRT")
+
+i3 <- update(i2, . ~ . + wz(r_actq_lctq) : wz(sigma)) 
+summary(i3)
+AIC(s0, i1, i2, i3)
+anova(s0, i1, i2, i3, test = "LRT")
+
+# simplify model due to many test
+i0 <- update(i3, . ~ . - wz(r_niq_nn) : wz(dtd) - wz(r_actq_lctq):wz(dtd))
+
+# make plots
+pear_vs_res(i0)
+
+plot_list <- list(
+  plot_sp_w_c(i0, "r_niq_nn", ylab = "Log-hazard term"), 
+  plot_sp_w_c(i0, "sigma", ylab = "Log-hazard term"))
+get_plot_device({  
+  for(i in plot_list)
+    i()
+}, "spline_plots_w_interact", onefile = FALSE)
+
+rm(i1, i2, i3)
+```
+
+```{r redo_check_interact, cache = 1, dependson = c("add_inter", "check_interact"), fig.height = 8, fig.width = 8}
+for(i in seq_along(vars)){
+  for(j in seq_len(length(vars) - i) + i){
+    cl <- list(
+      quote(resid_vs_covar_inter), quote(i0), vars[[i]][[1]],
+      vars[[j]][[1]], type = "partial")
+    eval(as.call(cl))
+  }
+}
+```
+
+</div>
+
+## Influential observations
+
+There are some observations that may need an extra check
+
+<div class="hideable">
+
+```{r needs_extra}
+local({
+  resids <- residuals(i0, "deviance")
+  vs <- c("tstop", "gvkey", "distress_type", all.vars(formula(i0)))
+  
+  cat("Remember the coefficient estimates\n")
+  print(coef(i0))
+  
+  o <- merge(
+    cbind(dat[, vs], resids = resids)[abs(resids) > 1, ], 
+    with(dat, data.frame(tstop, gvkey, mast_issr_num, conm, 
+                         date = make_ym_inv(tstop))), 
+    by = c("gvkey", "tstop"))
+  o <- tail(o[order(abs(o$resids)), ], 5)
+  rownames(o) <- nrow(o):1
+  o
+})
+```
+
+</div>
+
+<div class="hideable">
+
+```{r check_influence, cache = 1, dependson = "splines"}
+# test significance of terms
+(dr_i0 <- drop1(i0, test = "LRT"))
+```
+
+</div>
+
+Make table with likelihood ratio tests
+
+<div class="hideable">
+
+```{r lrt_test_tbl}
+local({
+  lrt_tb <- dr_i0
+  
+  # change row names
+  nam <- rownames(lrt_tb)
+  nam[1] <- "Full model"
+
+  regexp <- "(wz\\()([a-zA-Z0-9_]+)(,.+|\\))"
+  mas <- grepl(regexp, nam, perl = TRUE)
+  nam[mas] <- sapply(gsub(regexp, "\\2", nam[mas], perl = TRUE), get_label)
+  
+  regexp <- "(sp_w_c\\()([a-zA-Z0-9_]+)(,.+|\\))"
+  mas <- grepl(regexp, nam, perl = TRUE)
+  nam[mas] <- paste(
+    sapply(gsub(regexp, "\\2", nam[mas], perl = TRUE), get_label), 
+    "(spline term)")
+  
+  regexp <- "^log_market_ret|r1y$"
+  mas <- grepl(regexp, nam, perl = TRUE)
+  nam[mas] <- sapply(nam[mas], get_label)
+  
+  nam[-1] <- paste("%", nam[-1])
+  
+  rownames(lrt_tb) <- nam
+  
+  # pick the columns we need, order, and print before turning to chars
+  lrt_tb <- lrt_tb[, c("AIC", "Df", "LRT", "Pr(>Chi)")]
+  lrt_tb <- lrt_tb[c(1, order(lrt_tb[-1, "AIC"]) + 1L), ]
+  print(lrt_tb)
+  
+  # turn to chars for better format
+  pvals <- lrt_tb[, "Pr(>Chi)"]
+  x <- sprintf("  %0.6f", pvals)
+  x[pvals < 1e-6] <- "< 0.000001"
+  
+  lrt_tb_fn <- cbind(
+    AIC = sprintf("%.2f", lrt_tb$AIC),
+    Df = sprintf("%d", lrt_tb$Df), 
+    `LR-stat` = sprintf("%6.2f", lrt_tb$LRT), 
+    `P-value` = x)
+  
+  lrt_tb_fn[1, -1] <- ""
+  rownames(lrt_tb_fn) <- rownames(lrt_tb)
+  
+  write_tableHTML(
+    tableHTML(lrt_tb_fn), file = file.path(
+      "markdown", "output", "glm-drop-one-tab.html"))
+  
+  print(lrt_tb_fn, quote = FALSE)
+})
+```
+
+</div>
+
+## Add industry dummies
+
+<div class="hideable">
+
+```{r re_add_indu, cache = 1, dependson = "splines"}
+resid_vs_covar_inter(i0, sic_grp, tstop, bw = 4, type = "partial")
+resid_vs_covar_inter(
+  i0, as.factor(sic_grp_fine), tstop, bw = 4, type = "partial")
+
+h1 <- update(i0, . ~ . + sic_grp)
+summary(h1)
+anova(i0, h1, test = "LRT")
+
+# more fine grained industry groups
+h2 <- update(i0, . ~ . + as.factor(sic_grp_fine))
+summary(h2)
+anova(i0, h1, h2, test = "LRT")
+
+rm(h1, h2)
+```
+
+</div>
+
+## Check plot against time
+
+<div class="hideable">
+
+```{r check_time}
+# assumes that all rows represent one month
+resid_vs_covar(i0, tstop, bw = 4, type = "partial")
+resid_vs_covar_inter(i0, sic_grp, tstop, bw = 4, type = "partial")
+```
+
+```{r check_time_two, fig.height=8, fig.width=8}
+if(!any(sapply(vars, function(x) x[[1]] == quote(wz(rel_size)))))
+  # add variable due to size effect found in Lando et al. (2013)
+  vars <- c(vars, list(list(quote(wz(rel_size)))))
+
+for(i in seq_along(vars)){
+  cl <- list(
+    quote(resid_vs_covar_inter), quote(i0), quote(tstop),
+    vars[[i]][[1]], n_grp = 18L, type = "partial")
+  eval(as.call(cl))
+}
+```
+
+</div>
+
+## In-sample fit
+
+Fit model from  @Duffie09 without the random effect
+
+<div class="hideable">
+
+```{r fit_duf, cache = 1}
+duf <- glm(
+  y ~ wz(dtd) + wz(excess_ret) + r1y + log_market_ret, 
+  binomial("cloglog"), dat)
+summary(duf)
+
+# standardized as in the article
+local({
+  duf_scale <- glm(
+  y ~ wz(dtd, do_scale = TRUE) + wz(excess_ret, do_scale = TRUE) + 
+    scale(r1y) + scale(log_market_ret), binomial("cloglog"), dat)
+  summary(duf_scale) # compare w/ table III on page 2103
+})
+```
+
+</div>
+
+Create coefficient table
+
+<div class="hideable">
+
+```{r get_coef_table_input, cache = 1, dependson=c("fit_duf", "add_inter", "winz")}
+coef_tbl_input <- (function(...){
+  objs <- list(...)
+  names(objs) <- names(match.call()[-1L])
+  
+  lapply(objs, function(x){
+    tr = terms(x)
+    list(
+      coef = coef(x), 
+      coef_tbl = summary(x)$coefficient, 
+      drop1 = drop1(x, scope = attr(tr, "term.labels"), test = "LRT"), 
+      terms = tr, 
+      logLik = logLik(x),
+      AIC = AIC(x))
+  })
+})(duffie = duf, only_lin = f0, final = i0)
+```
+
+```{r make_coef_table}
+all_coefs <- unique(unlist(
+  sapply(coef_tbl_input, function(x) attr(x$terms, "term.labels"))))
+all_coefs <- c("(Intercept)", all_coefs)
+
+coef_tbl <- lapply(coef_tbl_input, function(x){
+  # create table to store output
+  out <- matrix(
+    NA_real_, nrow = length(all_coefs), ncol = 3, 
+    dimnames = list(all_coefs, c(
+      "Estimate", "Test statistic", "p-value")))
+  
+  # find matching columns
+  stopifnot("(Intercept)" %in% names(x$coef))
+  labs <- c("(Intercept)", attr(x$terms, "term.labels"))
+  ma <- match(labs, all_coefs)
+  stopifnot(!anyNA(ma))
+  
+  # insert coefficient and z-stats for those terms with one degree of freedom 
+  asg <- attr(model.matrix(x$terms, dat), "assign") + 1L
+  mult_col     <- x$drop1[, "Df"] > 1L
+  mult_col[1L] <- FALSE
+  out[ma[!mult_col], ] <- x$coef_tbl[
+    !asg %in% which(mult_col), c("Estimate", "z value", "Pr(>|z|)")] 
+  
+  # only insert likelihood ratio test statistic and p-value for the remaining
+  out[ma[mult_col], c("Test statistic", "p-value")] <- 
+    cbind(x$drop1$LRT[mult_col], x$drop1$`Pr(>Chi)`[mult_col])
+  
+  # Add AIC and log-likelihood 
+  out <- rbind(
+    out, 
+    AIC              = c(x$AIC   , NA_real_, NA_real_), 
+    `log-likelihood` = c(x$logLik, NA_real_, NA_real_), 
+    `# firms`        = c(length(unique(dat$gvkey)), NA_real_, NA_real_))
+  
+  out
+})
+
+# printed to be able to compare with latex result below
+print(do.call(cbind, coef_tbl), na.print = "")
+
+#####
+# make latex table
+local({
+  nr <- length(all_coefs)
+  nm <- length(coef_tbl)
+  nc <- nm * 2L + 1L
+  
+  t_arg <- paste(
+    "S[table-format=-2.3 ,table-alignment=right]@{}", 
+    "@{}l", 
+    "S[table-format=2.3,table-space-text-pre={*}, table-space-text-post={-*}]", 
+    sep = "\n")
+  cmark <- "{\\makecell[r]{\\checkmark}}"
+  
+  #####
+  # header
+  cat(
+    "\\begin{tabular}{l\n", 
+    paste(rep(t_arg, nm), sep = "\n"), "}\n", sep = "", 
+    "\\toprule\n", 
+    "& ", paste0("\\multicolumn{3}{c}{(", 
+                 tolower(as.roman(1:nm)), ")}", collapse = " & "), "\\\\\n", 
+    "\\midrule\n")
+  
+  #####
+  # coefficient estimate and test statistics
+  get_pstart <- function(x, p){
+    s <- ifelse(
+      p > .1 | is.na(p), "", ifelse(
+        p > .05, "$^{*}$", ifelse(
+          p > .01, "$^{**}$", "$^{***}$")))
+    
+    ifelse(is.na(x), " & ", paste0(x, " & ",  s))
+  }
+  for(i in 1:nr){
+    # row name
+    na <- rownames(coef_tbl[[1L]])[i]
+    na <- if(na == "(Intercept)") "Intercept" else {
+      na <- gsub(
+        "(wz\\()([a-zA-Z0-9_]+)(,.+|\\))", "\\2", na, perl = TRUE)
+      regexp <- "(sp_w_c\\()([a-zA-Z0-9_]+)(,.+|\\))"
+      is_spline <- grepl(regexp, na, perl = TRUE)
+      na <- gsub(regexp, "\\2", na, perl = TRUE)
+      
+      if(is_spline) 
+        paste0(get_label(na), " (spline)") else 
+          get_label(na)
+    }
+    
+    cat(na, "& ")
+    
+    # coefficients
+    z <- sapply(coef_tbl, "[", i = i, j = TRUE)
+    
+    z_t <- z["Test statistic", ]
+    z_t <- ifelse(is.na(z_t), "", sprintf("(%.3f)", z_t))
+    
+    z_e <- z["Estimate", ]
+    z_e <- ifelse(!is.na(z_e), sprintf("%.3f", z_e),  
+                  ifelse(z_t != "", cmark, ""))
+    z_e <- get_pstart(z_e, z["p-value", ])
+    
+    cat(rbind(z_e, z_t), sep = " & ")
+    cat(" \\\\\n")
+  }
+  
+  cat("\\midrule\n")
+  
+  #####  
+  # AIC, log-likelihood etc. 
+  z <- sprintf("%.1f", sapply(coef_tbl, "[", i = "AIC", j = 1), 1)
+  cat("AIC & ", paste0(z, " & & ", collapse = " & "), "\\\\\n")
+  z <- sprintf("%.1f", sapply(coef_tbl, "[", i = "log-likelihood", j = 1), 1)
+  cat("log-likelihood & ", paste0(z, "  & & ", collapse = " & "), "\\\\\n")
+  
+  z <- sprintf("%d", sapply(coef_tbl, "[", i = "# firms", j = 1), 1)
+  cat("Number of firms & ", paste0(z, " & & ", collapse = " & "), "\\\\\n")
+  
+  cat("\\bottomrule\n\\end{tabular}")
+})
+```
+
+</div>
+
+Show in-sample results
+
+<div class="hideable">
+
+<!-- 
+  knitr::opts_knit$set(output.dir = ".")
+  knitr::load_cache(
+      "in_sample", 
+      path = paste0(file.path("markdown", "cache", "preliminary"), 
+                    .Platform$file.sep))
+-->
+
+```{r in_sample, cache = 1}
+do_sims <- function(phat, tvar, nsim = 10000, spec = 6){
+  library(parallel)
+  cl <- makeCluster(spec)
+  on.exit(stopCluster(cl))
+  clusterSetRNGStream(cl)
+  
+  sims <- parSapply(cl, 1:nsim, function(..., tvar, phat){
+    y <- phat > runif(length(phat))
+    tapply(y, tvar, mean)
+  }, tvar = tvar, phat = phat)
+  
+  lbs <- apply(sims, 1, quantile, probs = .05)
+  ubs <- apply(sims, 1, quantile, probs = .95)
+  
+  list(lbs = lbs, ubs = ubs, mea = tapply(phat, tvar, mean))
+}
+
+set.seed(85664431)
+i0_sims <- do_sims(
+  phat = predict(i0, type = "response", newdata = dat), 
+  tvar = dat$tstop)
+
+f0_sims <- do_sims(
+  phat = predict(f0, type = "response", newdata = dat), 
+  tvar = dat$tstop)
+
+duf_sims <- do_sims(
+  phat = predict(duf, type = "response", newdata = dat), 
+  tvar = dat$tstop)
+```
+
+```{r plot_in_sample_sims, dependson = c("fit_duf", "splines")}
+make_sims_plot <- function(sims, dat, ylim = NA){
+  require(lubridate)
+  rea <- tapply(dat$y, dat$tstop, mean)
+  x <- make_ym_inv(as.integer(names(rea)))
+  is_miss <- rea < sims$lbs | rea > sims$ubs
+  plot(rea ~ x, pch = 16, ylim = ylim, 
+       col = ifelse(is_miss, "Black", "DarkGray"), cex = .7, 
+       xlab = "Year", ylab = "Average/realised distress rate", 
+       xaxt = "n")
+  nber_poly(is_dates = TRUE, very_ligth_gray = TRUE)
+  min_d <- as.POSIXlt(min(x))
+  month(min_d) <- 1L
+  max_d <- as.POSIXlt(max(x))
+  ax <- min_d
+  while(tail(ax, 1)$year + 1L <= max_d$year){
+    new_ax <- tail(ax, 1)
+    new_ax$year <- new_ax$year + 1L
+    ax <-  c(ax, new_ax)
+  }
+  labs <- format(ax, "%Y")
+  ix <- seq_along(labs)
+  labs[ix %% 2 == 0] <- ""
+  axis(side = 1, at = as.Date(ax), labels = labs, las = 2)
+  
+  lines(make_ym_inv(as.integer(names(rea))), sims$mea)
+  polygon(c(x, rev(x)), c(sims$lbs, rev(sims$ubs)), 
+          col = rgb(0, 0, 0, .1), border = NA)
+  
+  # diff plot
+  plot(rea - sims$mea ~ x,  
+       col = ifelse(is_miss, "Black", "DarkGray"), cex = .7, 
+       xlab = "Year", ylab = "Difference from realised default rate", 
+       xaxt = "n", type = "h", ylim = c(-diff(ylim) * .4, diff(ylim) * .5))
+  nber_poly(is_dates = TRUE, very_ligth_gray = TRUE)
+  axis(side = 1, at = as.Date(ax), labels = labs, las = 2)
+}
+
+get_plot_device(
+  make_sims_plot(i0_sims, dat, c(0, .011)), 
+  "glm-spline-agg-in-sample", onefile = FALSE)
+get_plot_device(
+  make_sims_plot(f0_sims , dat, c(0, .011)), 
+  "glm-no-spline-agg-in-sample", onefile = FALSE)
+get_plot_device(
+  make_sims_plot(duf_sims, dat, c(0, .011)), 
+  "glm-duf-agg-in-sample", onefile = FALSE)
+```
+
+```{r auc_in_sample}
+library(pROC)
+auc(response = dat$y, predictor = predict(i0 , type = "response"))
+auc(response = dat$y, predictor = predict(f0 , type = "response"))
+auc(response = dat$y, predictor = predict(duf, type = "response"))
+```
+
+</div>
+
+## Out-sample fit
+
+<div class="hideable">
+
+<!--
+  knitr::opts_knit$set(output.dir = ".")
+  knitr::load_cache(
+      "fit_out_sample", 
+      path = paste0(file.path("markdown", "cache", "preliminary"), 
+                    .Platform$file.sep))
+-->
+
+```{r fit_out_sample, cache = 1, dependson = c("fit_duf", "splines")}
+yrs <- 1999:as.integer(format(make_ym_inv(max(dat$tstop)), "%Y"))
+dat$year <- as.integer(format(make_ym_inv(dat$tstop), "%Y"))
+
+out <- cbind(
+  data.frame(y = dat$y), year = dat$year, 
+  gvkey = dat$gvkey, tstop = dat$tstop, f0_pred = NA_real_, 
+  i0_pred = NA_real_, duf_pred = NA_real_)
+
+frms <- list(f = formula(f0), s = formula(i0), d = formula(duf))
+out_sample_res <- lapply(yrs, function(yr){
+  cat("Running", sQuote(yr), "\n")
+  
+  fits <- lapply(
+    frms, glm, family = binomial("cloglog"), dat = subset(dat, year < yr))
+  idx <- dat$year == yr
+  
+  preds <- lapply(fits, predict, newdata = dat[idx, ], type = "response")
+  
+  res <- sapply(preds, function(x){
+    c(auc         = c(auc(response = dat$y[idx], x)), 
+      `log score` = -mean(ifelse(dat$y[idx], log(x), log(1 - x))))
+  })
+
+  out[idx, "f0_pred"] <<- preds$f
+  out[idx, "i0_pred"] <<- preds$s
+  out[idx, "duf_pred"] <<- preds$d
+  
+  list(res = res, coefs = lapply(fits, function(x) summary(x)$coefficients))
+})
+```
+
+```{r plot_out_sample_metrics}
+metrics <- simplify2array(lapply(out_sample_res, "[[", "res"))
+metrics <- metrics[, c("f", "s", "d"), ]
+
+get_plot_device({
+  matplot(
+    yrs, t(metrics["auc", , ]), type = "p", pch = 16:18, 
+    ylab = "Out-of-sample AUC", xlab = "Year")
+}, "glm-auc-out-sample")
+
+get_plot_device({
+  matplot(
+    yrs, t(metrics["log score", , ]), type = "p", pch = 16:18, 
+    ylab = "Out-of-sample log-score", xlab = "Year")
+}, "glm-log-score-out-sample")
+
+get_plot_device({
+  matplot(
+    yrs, cbind(
+      metrics["log score", "f", ] - metrics["log score", "d", ], 
+      metrics["log score", "s", ] - metrics["log score", "d", ]), 
+    pch = 16:17, col = 1:2, 
+    ylab = "Out-of-sample log-score difference", xlab = "Year")
+  abline(h = 0, lty = 2)
+}, "glm-log-score-diff-out-sample")
+```
+
+<!--
+  knitr::opts_knit$set(output.dir = ".")
+  knitr::load_cache(
+      "sim_out_sample", 
+      path = paste0(file.path("markdown", "cache", "preliminary"), 
+                    .Platform$file.sep))
+-->
+
+```{r sim_out_sample, cache=1, dependson= c("in_sample", "fit_out_sample")}
+min_yr <- min(yrs) 
+stopifnot(
+  all(is.na(subset(out, year < min_yr, 
+                   c("f0_pred", "i0_pred", "duf_pred")))),
+  !anyNA(subset(out, year >= min_yr, 
+                c("f0_pred", "i0_pred", "duf_pred"))))
+
+out <- subset(out, year >= min_yr)
+set.seed(85664431)
+i0_sims_out <- do_sims(phat = out[, "i0_pred"], tvar = out$tstop)
+f0_sims_out <- do_sims(phat = out[, "f0_pred"], tvar = out$tstop)
+duf_sims_out <- do_sims(phat = out[, "duf_pred"], tvar = out$tstop)
+``` 
+
+```{r plot_out_sample_sims}
+get_plot_device(
+  make_sims_plot(i0_sims_out , out, c(0, .011)), onefile = FALSE,
+  "glm-spline-agg-out-sample")
+get_plot_device(
+  make_sims_plot(f0_sims_out , out, c(0, .011)), onefile = FALSE, 
+  "glm-no-spline-agg-out-sample")
+get_plot_device(
+  make_sims_plot(duf_sims_out, out, c(0, .011)),  onefile = FALSE,
+  "glm-duf-agg-out-sample")
+```
+
+</div>
+
+## References
