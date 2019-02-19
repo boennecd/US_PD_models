@@ -15,4 +15,4 @@ This repository is used to create the data set that is being used.
 Knit the documents at the project root. You can change this in Rstudio in the "Knit" 
 drop down menu. We use [packrat](https://rstudio.github.io/packrat/) to ensure 
 that it is easier to reproduce the results. It should start installing the packages 
-and exact versions of the packages if you open the `US_PD_analysis.Rproj` file.
+and exact versions of the packages if you open the `.Rproj` file.
