@@ -125,7 +125,7 @@ $(document).ready(function () {
 <h1 class="title toc-ignore">Model with random effects – Annual</h1>
 <h4 class="author"><em>Rastin Matin</em></h4>
 <h4 class="author"><em>Benjamin Christoffersen</em></h4>
-<h4 class="date"><em>18 February, 2019</em></h4>
+<h4 class="date"><em>22 February, 2019</em></h4>
 
 </div>
 
@@ -334,7 +334,7 @@ fs &lt;- list(
 #R +             ylab = ylab, ylim = range(lb, ub))
 #R +         lines(df[[1]], lb, lty = 2)
 #R +         lines(df[[1]], ub, lty = 2)
-#R +         add_hist(wz(x), breaks = 50)
+#R +         add_hist(wz(x, do_center = FALSE), breaks = 50)
 #R +     }
 #R + }</code></pre>
 <pre class="r"><code>source(file.path(&quot;R&quot;, &quot;get_plot_device.R&quot;), echo = TRUE, 
@@ -576,7 +576,7 @@ tmp$git_info</code></pre>
 #R [1] &quot;master&quot;
 #R 
 #R $id
-#R [1] &quot;4310c9b&quot;</code></pre>
+#R [1] &quot;e6d5091&quot;</code></pre>
 <pre class="r"><code>rm(tmp)</code></pre>
 <p>Show some properties and prepare the data</p>
 <div class="hideable">
