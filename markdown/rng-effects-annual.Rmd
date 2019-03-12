@@ -309,6 +309,13 @@ library(dynamichazard)
 n_threads <- 6L
 ```
 
+```{r set_ctrl_default}
+ctrl_default <- PF_control(
+  N_fw_n_bw = 500L, N_smooth = 1000L, N_first = 1000L, n_max = 1000, 
+  n_threads = n_threads, nu = 8L, covar_fac = 1.2, ftol_rel = 1e-6,
+  smoother = "Fearnhead_O_N", eps = 1e-4, averaging_start = 200L)
+```
+
 ```{r assign_log_n_eval}
 # function to sink output to log file
 log_n_eval <- function(expr, log_prefix){
@@ -359,10 +366,7 @@ log_n_eval({
     data = dat_con, Fmat = diag(.5, 1),
     model = "exponential", by = 12L, max_T = max(dat_con$tstop), 
     id = dat_con$gvkey_int, 
-    Q_0 = 2^2, Q = .1^2, type = "VAR", control = PF_control(
-      N_fw_n_bw = 400L, N_smooth = 1000L, N_first = 1000L, n_max = 100L, 
-      n_threads = n_threads, nu = 8L, N_smooth_final = 300L,
-      smoother = "Fearnhead_O_N", eps = 1e-4), 
+    Q_0 = 2^2, Q = .1^2, type = "VAR", control = ctrl_default, 
     trace = 1L)
 }, "_state_rng_inter")
 ```
@@ -371,11 +375,15 @@ Take one more iteration with more particles
 
 ```{r def_take_xtra, cache = 1}
 take_xtra <- function(
-  fit, n_max = 10L, trace = 0L, N_fw_n_bw, N_smooth, N_first, N_smooth_final){
+  fit, n_max = 1000L, trace = 0L, N_fw_n_bw = 1000L, N_smooth = 2500L, 
+  N_first = N_fw_n_bw, N_smooth_final = N_smooth, averaging_start = 200L, 
+  eps = 1e-5){
   cl <- fit$call
-  ctrl <- cl[["control"]]
-  ctrl[c("N_fw_n_bw", "N_smooth", "N_first", "n_max", "N_smooth_final")] <- 
-    c(N_fw_n_bw, N_smooth, N_first, n_max, N_smooth_final)
+  ctrl <- fit$control
+  ctrl[c("N_fw_n_bw", "N_smooth", "N_first", "n_max", "N_smooth_final", 
+         "averaging_start", "eps")] <- 
+    c(N_fw_n_bw, N_smooth, N_first, n_max, N_smooth_final, averaging_start, 
+      eps)
   cl[c("control", "trace")] <- list(ctrl, trace)
   
   . <- function(x, y)
@@ -563,10 +571,7 @@ log_n_eval({
     
     model = "exponential", by = 12L, max_T = max(dat_con$tstop), 
     id = dat_con$gvkey_int, 
-    Q_0 = diag(1, 2), type = "VAR", control = PF_control(
-      N_fw_n_bw = 400L, N_smooth = 1000L, N_first = 1000L, n_max = 200L, 
-      n_threads = n_threads, nu = 8L, N_smooth_final = 300L,
-      smoother = "Fearnhead_O_N", eps = 1e-4), 
+    Q_0 = diag(1, 2), type = "VAR", control = ctrl_default, 
     trace = 1L)
 }, "_state_rng_size_inter")
 ```
@@ -835,6 +840,11 @@ Then we forecast. We start by fitting the models
 dat_con$yr <- as.integer(dat_con$d_yr)
 yrs <- 1998:(max(dat_con$yr) - 1L)
 
+ctrl_default_out_of_sample <- PF_control(
+  N_fw_n_bw = 2000L, N_smooth = 1000L, N_first = 2000L, n_max = 1000, 
+  n_threads = n_threads, nu = 8L, covar_fac = 1.2, ftol_rel = 1e-6,
+  smoother = "Fearnhead_O_N", eps = 1e-4, averaging_start = 50L)
+
 do_re_run_expr <- expression(
   if(exists("do_re_run"))
     do_re_run else 
@@ -867,10 +877,7 @@ for(y_i in yrs){
           -8.9, -0.61, -1.4, -0.2, -1.7, 0.99, -0.29, 83, -1.2, -0.2, 
           0.014, 0.032, 4.9, 0.9, 0.045, 0.39, -0.17, -1.9, -3, 9.6),
         
-        type = "VAR", control = PF_control(
-          N_fw_n_bw = 2000L, N_smooth = 1000L, N_first = 2000L, n_max = 100L, 
-          n_threads = n_threads, nu = 8L, N_smooth_final = 300L,
-          smoother = "Fearnhead_O_N", eps = 1e-4), 
+        type = "VAR", control = ctrl_default_out_of_sample, 
         trace = 1L)
     }, paste0("_outsample-rng-inter-", y_i))
     
@@ -902,10 +909,7 @@ for(y_i in yrs){
           -8.9, -0.61, -1.5, -0.2, -1.7, 0.97, -0.29, 91, -1.2, -0.22, 
           0.015, -0.17, 0.35, 0.94, -0.075, 0.34, -0.27, -2.1, -3.3, 9.5),
         
-        type = "VAR", control = PF_control(
-          N_fw_n_bw = 1000L, N_smooth = 1000L, N_first = 1000L, n_max = 100L, 
-          n_threads = n_threads, nu = 8L, N_smooth_final = 300L,
-          smoother = "Fearnhead_O_N", eps = 1e-4), 
+        type = "VAR", control = ctrl_default_out_of_sample, 
         trace = 1L)
     }, paste0("_outsample-rng-size-inter-", y_i))
     
@@ -942,11 +946,28 @@ for(o in names(size_inter_ms))
   plot(size_inter_ms[[o]]$log_likes, ylab = o, type = "l")
 
 # quickly check coefficients
-signif(sapply(inter_ms, "[[", "fixed_effects"), 2)
+x <- signif(sapply(inter_ms, "[[", "fixed_effects"), 2)
+x["(Intercept)", ]
+# scale by standard deviations
+sds <- apply(model.matrix(tail(inter_ms)[[1L]]$terms$fixed, dat_con), 2, sd)
+sds["(Intercept)"] <- NA
+round(x <- t(x * sds)           , 1)
+round(z <- t(t(x) - colMeans(x)), 1)
+matplot(z, type = "l", lty = 1)
+
 sapply(inter_ms, "[[", "Q")
 sapply(inter_ms, "[[", "F")
 
-signif(sapply(size_inter_ms, "[[", "fixed_effects"), 2)
+x <- signif(sapply(size_inter_ms, "[[", "fixed_effects"), 2)
+x["(Intercept)", ]
+# scale by standard deviations
+sds <- apply(
+  model.matrix(tail(size_inter_ms)[[1L]]$terms$fixed, dat_con), 2, sd)
+sds["(Intercept)"] <- NA
+round(x <- t(x * sds)           , 1)
+round(z <- t(t(x) - colMeans(x)), 1)
+matplot(z, type = "l", lty = 1)
+
 sapply(size_inter_ms, "[[", "Q")
 sapply(size_inter_ms, "[[", "theta")
 

@@ -283,6 +283,13 @@ library(dynamichazard)
 n_threads <- 8L
 ```
 
+```{r set_ctrl_default}
+ctrl_default <- PF_control(
+  N_fw_n_bw = 200L, N_smooth = 400L, N_first = 1000L, n_max = 1000, 
+  n_threads = n_threads, nu = 8L, covar_fac = 1.2, ftol_rel = 1e-6,
+  smoother = "Fearnhead_O_N", eps = 1e-4, averaging_start = 200L)
+```
+
 ```{r assign_log_n_eval}
 # function to sink output to log file
 log_n_eval <- function(expr, log_prefix){
@@ -330,10 +337,7 @@ log_n_eval({
       log_market_ret, 
     random = ~ 1, data = dat, Fmat = diag(.5, 1),
     model = "cloglog", by = 1L, max_T = max(dat$tstop), id = dat$gvkey_unique, 
-    Q_0 = 2^2, Q = .1^2, type = "VAR", control = PF_control(
-      N_fw_n_bw = 200L, N_smooth = 200L, N_first = 1000L, n_max = 100, 
-      N_smooth_final = 100L, n_threads = n_threads, nu = 8L, 
-      smoother = "Fearnhead_O_N", eps = 1e-4), 
+    Q_0 = 2^2, Q = .1^2, type = "VAR", control = ctrl_default, 
     trace = 1L)
 }, "_duffie_09")
 ```
@@ -342,11 +346,15 @@ Take more iterations
 
 ```{r def_take_xtra, cache = 1}
 take_xtra <- function(
-  fit, n_max = 10L, trace = 0L, N_fw_n_bw, N_smooth, N_first, N_smooth_final){
+  fit, n_max = 1000L, trace = 0L, N_fw_n_bw = 1000L, N_smooth = 2500L, 
+  N_first = N_fw_n_bw, N_smooth_final = N_smooth, averaging_start = 200L, 
+  eps = 1e-5){
   cl <- fit$call
-  ctrl <- cl[["control"]]
-  ctrl[c("N_fw_n_bw", "N_smooth", "N_first", "n_max", "N_smooth_final")] <- 
-    c(N_fw_n_bw, N_smooth, N_first, n_max, N_smooth_final)
+  ctrl <- fit$control
+  ctrl[c("N_fw_n_bw", "N_smooth", "N_first", "n_max", "N_smooth_final", 
+         "averaging_start", "eps")] <- 
+    c(N_fw_n_bw, N_smooth, N_first, n_max, N_smooth_final, averaging_start, 
+      eps)
   cl[c("control", "trace")] <- list(ctrl, trace)
   
   . <- function(x, y)
@@ -386,9 +394,25 @@ take_xtra <- function(
 --> 
 
 ```{r xtra_fit_duffie_09, cache = 1, dependson = "fit_duffie_09"}
+set.seed(seed)   
+log_n_eval({
+  duffie_09_xtra <- take_xtra(duffie_09, trace = 1L)
+}, "_duffie_09_xtra")
+```
+
+<!-- 
+  knitr::opts_knit$set(output.dir = ".")
+  knitr::load_cache(
+      "large_fit_duffie_09", 
+      path = paste0(file.path("markdown", "cache", "rng-effects"), 
+                    .Platform$file.sep))
+--> 
+
+```{r large_fit_duffie_09, cache = 1, dependson = "xtra_fit_duffie_09"}
 set.seed(seed) 
-duffie_09_xtra <- take_xtra(
-  duffie_09, n_max = 1L, N_fw_n_bw = 500L, N_smooth = 2500L, N_first = 2500L, N_smooth_final = 2500L)
+duffie_09_large <- take_xtra(
+  duffie_09_xtra, n_max = 1L, N_fw_n_bw = 500L, N_smooth = 2500L, 
+  N_first = 2500L, N_smooth_final = 2500L)
 ```
 
 </div>
@@ -427,7 +451,7 @@ pf_plot_effects <- function(fit, qlvl = pnorm(-1) * 2, ylabs, type = "smoothed_c
     abline(h = 0)
   }
 }
-pf_plot_effects(duffie_09_xtra, ylabs = "Intercept")
+pf_plot_effects(duffie_09_large, ylabs = "Intercept")
 
 #####
 # plot effective sample size
@@ -441,24 +465,25 @@ plot_eff <- function(fit){
 }
 plot_eff(duffie_09)
 plot_eff(duffie_09_xtra)
+plot_eff(duffie_09_large)
 
 ##### 
 # plot log-likelihood and estimates
-plot(duffie_09$log_likes)
+plot(duffie_09_xtra$log_likes)
 plot(duffie_09$EM_ests$F ~ sqrt(duffie_09$EM_ests$Q), 
      xlab = expression(sigma), ylab = expression(varphi), type = "l")
 points(sqrt(duffie_09$EM_ests$Q), duffie_09$EM_ests$F, pch = 1)
 
-sqrt(duffie_09_xtra$Q)
-duffie_09_xtra$F
-duffie_09_xtra$fixed_effects
+sqrt(duffie_09_large$Q)
+duffie_09_large$F
+duffie_09_large$fixed_effects
 
-logLik(duffie_09_xtra)
+logLik(duffie_09_large)
 local({
   # same model without random effects
   fix_only <- glm(y ~ wz(dtd) + wz(excess_ret) + r1y + log_market_ret, 
                   binomial("cloglog"), dat)
-  print(AIC(base_fit, fix_only, duffie_09_xtra), digits = 6)
+  print(AIC(base_fit, fix_only, duffie_09_large), digits = 6)
   print(logLik(fix_only), digits = 6)
 })
 ```
@@ -509,40 +534,26 @@ log_n_eval({
     fixed = frm_fixed, random = ~ 1, 
     data = dat, Fmat = diag(.5, 1),
     model = "cloglog", by = 1L, max_T = max(dat$tstop), id = dat$gvkey_unique, 
-    Q_0 = 2^2, Q = .1^2, type = "VAR", control = PF_control(
-      N_fw_n_bw = 200L, N_smooth = 200L, N_first = 1000L, n_max = 100L, 
-      n_threads = n_threads, nu = 8L, N_smooth_final = 100L,
-      smoother = "Fearnhead_O_N", eps = 1e-4), 
+    Q_0 = 2^2, Q = .1^2, type = "VAR", control = ctrl_default, 
     trace = 1L)
 }, "_state_rng_inter")
 ```
 
 Take more iterations
 
-```{r xtra_state_full_rng_inter, cache = 1, dependson = "state_full_rng_inter"}
-set.seed(seed)   
-log_n_eval({
-  state_rng_inter_xtra <- take_xtra(
-    state_rng_inter, n_max = 150L, N_fw_n_bw = 500L, N_smooth = 2000L, N_smooth_final = 250L,
-    N_first = 2500L, trace = 1L)
-}, "_state_rng_inter_xtra")
-```
-
 <!-- 
   knitr::opts_knit$set(output.dir = ".")
   knitr::load_cache(
-      "xtra_xtra_state_full_rng_inter", 
+      "xtra_state_full_rng_inter", 
       path = paste0(file.path("markdown", "cache", "rng-effects"), 
                     .Platform$file.sep))
--->
+--> 
 
-```{r xtra_xtra_state_full_rng_inter, cache = 1, dependson = "xtra_state_full_rng_inter"}
+```{r xtra_state_full_rng_inter, cache = 1, dependson = "state_full_rng_inter"}
 set.seed(seed)   
 log_n_eval({
-  state_rng_inter_xtra <- take_xtra(
-    state_rng_inter_xtra, n_max = 50L, N_fw_n_bw = 1000L, N_smooth = 5000L, 
-    N_smooth_final = 300L, N_first = 2500L, trace = 1L)
-}, "_state_rng_inter_xtra_xtra")
+  state_rng_inter_xtra <- take_xtra(state_rng_inter, trace = 1L)
+}, "_state_rng_inter_xtra")
 ```
 
 <!-- 
@@ -553,10 +564,10 @@ log_n_eval({
                     .Platform$file.sep))
 --> 
 
-```{r xtra_n_more_state_full_rng_inter, cache = 1, dependson = "xtra_xtra_state_full_rng_inter"}
+```{r xtra_n_more_state_full_rng_inter, cache = 1, dependson = "xtra_state_full_rng_inter"}
 state_rng_inter_large <- take_xtra(
-  state_rng_inter_xtra, n_max = 1L, N_fw_n_bw = 5000L, N_smooth = 10000L, N_smooth_final = 2500L, 
-  N_first = 2500L)
+  state_rng_inter_xtra, n_max = 1L, N_fw_n_bw = 5000L, 
+  N_smooth = 10000L, N_smooth_final = 2500L, N_first = 2500L)
 ```
 
 </div>
@@ -748,49 +759,26 @@ log_n_eval({
                  0, 1), byrow = TRUE, ncol = 2), theta = c(.9, .9), 
     K = matrix(1, 1, 1), phi = 0,
     
-    control = PF_control(
-      N_fw_n_bw = 100L, N_smooth = 200L, N_first = 1000L, n_max = 100L,
-      N_smooth_final = 100L, n_threads = n_threads, nu = 8L, 
-      smoother = "Fearnhead_O_N", eps = 1e-4), 
+    control = ctrl_default, 
     trace = 1L)
 }, "_state_rng_size_restrict")
-```
-
-```{r xtra_w_size_state_rng, cache = 1, dependson = "w_size_state_rng"}
-set.seed(seed)
-log_n_eval({
-  state_rng_size_restrict_xtra <- take_xtra(
-    state_rng_size_restrict, n_max = 200L, N_fw_n_bw = 400L, N_smooth = 1000L, 
-    N_first = 1000L, trace = 1L, N_smooth_final = 200L)
-}, "_state_rng_inter_xtra_w_size_one")
-```
-
-```{r xtra_xtra_w_size_state_rng, cache = 1, dependson = "xtra_w_size_state_rng"}
-set.seed(seed)
-log_n_eval({
-  state_rng_size_restrict_xtra <- take_xtra(
-    state_rng_size_restrict_xtra, n_max = 100L, N_fw_n_bw = 1000L, N_smooth = 2500L, 
-    N_first = 1000L, trace = 1L, N_smooth_final = 200L)
-}, "_state_rng_inter_xtra_xtra_w_size_one")
 ```
 
 <!-- 
   knitr::opts_knit$set(output.dir = ".")
   knitr::load_cache(
-      "xtra_xtra_xtra_w_size_state_rng", 
+      "xtra_w_size_state_rng", 
       path = paste0(file.path("markdown", "cache", "rng-effects"), 
                     .Platform$file.sep))
 --> 
 
-```{r xtra_xtra_xtra_w_size_state_rng, cache = 1, dependson = "xtra_xtra_w_size_state_rng"}
+```{r xtra_w_size_state_rng, cache = 1, dependson = "w_size_state_rng"}
 set.seed(seed)
 log_n_eval({
   state_rng_size_restrict_xtra <- take_xtra(
-    state_rng_size_restrict_xtra, n_max = 50L, N_fw_n_bw = 2000L, N_smooth = 5000L, 
-    N_first = 10000L, trace = 1L, N_smooth_final = 400L)
-}, "_state_rng_inter_xtra_xtra_xtra_w_size_one")
+    state_rng_size_restrict, trace = 1L)
+}, "_state_rng_inter_xtra_w_size_one")
 ```
-
 
 <!-- 
   knitr::opts_knit$set(output.dir = ".")
@@ -800,7 +788,7 @@ log_n_eval({
                     .Platform$file.sep))
 --> 
 
-```{r large_w_size_state_rng, cache = 1, dependson = "xtra_xtra_xtra_w_size_state_rng"}
+```{r large_w_size_state_rng, cache = 1, dependson = "xtra_w_size_state_rng"}
 state_rng_size_restrict_large <- take_xtra(
   state_rng_size_restrict_xtra, n_max = 1L, N_fw_n_bw = 10000L, 
   N_smooth = 50000L, N_first = 10000L, N_smooth_final = 2000L)
@@ -870,25 +858,73 @@ AIC(base_fit, duffie_09_xtra, state_rng_inter_large,
 ```{r marg_size_effect, cache = 1}
 #####
 # get idea of marginal effect
-get_plot_device(
-  local({
-    library(mgcv)
-    library(parallel)
-    cl <- makeCluster(6L)
-    dat$wz_rel_size <- wz(dat$rel_size)
-    gam_fit <- bam(
-      y ~ ti(tstop, k = 15, bs = "cr") + 
-        ti(wz_rel_size, k = 15, bs = "cr") +
-        ti(tstop, wz_rel_size, k = c(15, 15), bs = "cr"), 
-      binomial("cloglog"), dat, cluster = cl)
-    stopCluster(cl)
-    
-    print(summary(gam_fit))
-    plot(gam_fit)
-    for(i in 0:3)
-      vis.gam(gam_fit, ticktype = "detailed", theta = -45 + 90 * i)
-    
-  }), "size-time-marg", onefile = FALSE)
+local({
+  library(mgcv)
+  library(parallel)
+  cl <- makeCluster(6L)
+  dat$wz_rel_size <- wz(dat$rel_size)
+  dat$ti_var <- make_ym_inv(dat$tstop)
+  dat$ti_var <- as.integer(format(dat$ti_var, "%Y")) + 
+    (as.integer(format(dat$ti_var, "%m")) - 1L)/12L
+  gam_fit <- bam(
+    y ~ ti(ti_var, k = 15, bs = "cr") + 
+      ti(wz_rel_size, k = 15, bs = "cr") +
+      ti(ti_var, wz_rel_size, k = c(15, 15), bs = "cr"), 
+    binomial("cloglog"), dat, cluster = cl)
+  stopCluster(cl)
+  
+  print(summary(gam_fit))
+      
+  get_plot_device({
+      plot(gam_fit)
+      n_plots <- 9L
+      for(i in 0:(n_plots - 1L))
+        vis.gam(gam_fit, ticktype = "detailed", theta = -45 + 360 * i / n_plots, 
+                color = "gray", zlab = "Log-hazard", xlab = "Year", 
+                ylab = "Log relative market size")
+    }, "size-time-marg", onefile = FALSE)
+})
+```
+
+</div>
+
+Get standard errors
+
+<div class="hideable"> 
+
+```{r sd_w_size_state_rng, eval = FALSE, echo = FALSE}
+# First check variance of estimates
+ex <- local({
+  set.seed(26217670)
+  ex <- replicate(10, {
+    tmp <- state_rng_size_restrict_large
+    rnorm(1)
+    tmp$seed <- .Random.seed
+    o <- PF_get_score_n_hess(tmp, use_O_n_sq = TRUE)
+    o$set_n_particles(N_fw = 1000L, N_first = 5000L)
+    o$get_get_score_n_hess()
+  }, simplify = FALSE)
+  
+  z <- sapply(ex, function(x) sqrt(diag(solve(x$observation$neg_obs_info))))
+  print(z)
+  print(zm <- rowMeans(z))
+  print(apply(z, 1, sd))
+  
+  print(cbind(rng = zm, `non-rng` = sqrt(diag(vcov(base_fit)))))
+  
+  ex
+})
+
+# then make final run we will use
+state_rng_size_restrict_derivs <- local({
+  o <- PF_get_score_n_hess(state_rng_size_restrict_large, use_O_n_sq = TRUE)
+  o$set_n_particles(N_fw = 5000L, N_first = 10000L)
+  o$get_get_score_n_hess()
+})
+
+sqrt(diag(solve(state_rng_size_restrict_derivs$observation$neg_obs_info)))
+sqrt(diag(solve(
+  state_rng_size_restrict_derivs$state$neg_obs_info)))
 ```
 
 </div>
@@ -913,10 +949,7 @@ log_n_eval({
     data = dat, model = "cloglog", by = 1L, max_T = max(dat$tstop), 
     id = dat$gvkey_unique, type = "VAR",  Q_0 = diag(c(1, 2)^2),
     Q = matrix(c(.12, .02, .02, .06), 2), Fmat = diag(.8, 2),
-    control = PF_control(
-      N_fw_n_bw = 100L, N_smooth = 200L, N_first = 1000L, n_max = 100L,
-      N_smooth_final = 100L, n_threads = n_threads, nu = 8L, 
-      smoother = "Fearnhead_O_N", eps = 1e-4), 
+    control = ctrl_default, 
     trace = 1L)
 }, "_state_rng_size_unrestrict")
 ```
@@ -927,26 +960,8 @@ Take more iterations
 set.seed(seed)   
 log_n_eval({
   state_rng_size_unrestrict_xtra <- take_xtra(
-    state_rng_size_unrestrict, n_max = 150L, N_fw_n_bw = 200L, N_smooth = 1000L, 
-    N_smooth_final = 200L, N_first = 2500L, trace = 1L)
+    state_rng_size_unrestrict, trace = 1L)
 }, "_state_rng_size_unrestrict_xtra")
-```
-
-<!-- 
-  knitr::opts_knit$set(output.dir = ".")
-  knitr::load_cache(
-      "xtra_unrestricted_w_size_state_rng", 
-      path = paste0(file.path("markdown", "cache", "rng-effects"), 
-                    .Platform$file.sep))
---> 
-
-```{r xtra_xtra_unrestricted_w_size_state_rng, cache = 1, dependson = "xtra_unrestricted_w_size_state_rng"}
-set.seed(seed)   
-log_n_eval({
-  state_rng_size_unrestrict_xtra <- take_xtra(
-    state_rng_size_unrestrict_xtra, n_max = 50L, N_fw_n_bw = 500L, N_smooth = 2000L, 
-    N_smooth_final = 250L, N_first = 2500L, trace = 1L)
-}, "_state_rng_size_unrestrict_xtra_xtra")
 ```
 
 <!-- 
@@ -1053,10 +1068,7 @@ log_n_eval({
                  0, 0, 1), byrow = TRUE, ncol = 3), theta = c(.9, .9, .1), 
     K = diag(3), phi = c(2.95, 0, 0),
     
-    control = PF_control(
-      N_fw_n_bw = 200L, N_smooth = 500L, N_first = 1000L, n_max = 100L,
-      N_smooth_final = 100L, n_threads = n_threads, nu = 8L, 
-      smoother = "Fearnhead_O_N", eps = 1e-4), 
+    control = ctrl_default, 
     trace = 1L)
 }, "_state_rng_niq_size_restrict")
 ```
@@ -1075,27 +1087,8 @@ Take more iterations
 set.seed(seed)   
 log_n_eval({
   state_rng_niq_size_restrict_xtra <- take_xtra(
-    state_rng_niq_size_restrict, n_max = 250L, N_fw_n_bw = 500L, N_smooth = 1000L, 
-    N_smooth_final = 200L, N_first = 2500L, trace = 1L)
+    state_rng_niq_size_restrict, trace = 1L)
 }, "_state_rng_niq_size_restrict_xtra")
-```
-
-```{r xtra_xtra_restricted_w_niq_size_state_rng, cache = 1, dependson = "xtra_restricted_w_niq_size_state_rng"}
-set.seed(seed)   
-log_n_eval({
-  state_rng_niq_size_restrict_xtra <- take_xtra(
-    state_rng_niq_size_restrict_xtra, n_max = 50L, N_fw_n_bw = 500L, N_smooth = 2000L, 
-    N_smooth_final = 250L, N_first = 2500L, trace = 1L)
-}, "_state_rng_niq_size_restrict_xtra_xtra")
-```
-
-```{r xtra_xtra_xtra_restricted_w_niq_size_state_rng, cache = 1, dependson = "xtra_xtra_restricted_w_niq_size_state_rng"}
-set.seed(seed)   
-log_n_eval({
-  state_rng_niq_size_restrict_xtra <- take_xtra(
-    state_rng_niq_size_restrict_xtra, n_max = 50L, N_fw_n_bw = 1000L, N_smooth = 4000L, 
-    N_smooth_final = 300L, N_first = 10000L, trace = 1L)
-}, "_state_rng_niq_size_restrict_xtra_xtra_xtra")
 ```
 
 <!--
@@ -1106,7 +1099,7 @@ log_n_eval({
                     .Platform$file.sep))
 -->
 
-```{r large_restricted_w_niq_size_state_rng, cache = 1, dependson = "xtra_xtra_xtra_restricted_w_niq_size_state_rng"}
+```{r large_restricted_w_niq_size_state_rng, cache = 1, dependson = "xtra_restricted_w_niq_size_state_rng"}
 state_rng_niq_size_restrict_large <- take_xtra(
   state_rng_niq_size_restrict_xtra, n_max = 1L, N_fw_n_bw = 2000L, 
   N_smooth = 10000L, N_smooth_final = 2500L, N_first = 2500L)

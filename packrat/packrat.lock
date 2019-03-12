@@ -143,18 +143,10 @@ Version: 0.6.17
 Hash: 6bd8bf6c0430a024a994f2481c2d8516
 
 Package: dynamichazard
-Source: github
-Version: 0.6.3
-Hash: 50b5ff6266925b16612f4ac6c4bc34b4
-Requires: Rcpp, RcppArmadillo
-GithubRepo: dynamichazard
-GithubUsername: boennecd
-GithubRef: c591e8088f99cc22a86a31f3b18924d49b18f33d
-GithubSha1: c591e8088f99cc22a86a31f3b18924d49b18f33d
-RemoteHost: https://api.github.com
-RemoteRepo: dynamichazard
-RemoteUsername: boennecd
-RemoteSha: c591e8088f99cc22a86a31f3b18924d49b18f33d
+Source: CRAN
+Version: 0.6.4
+Hash: 71c3aa211dfa683b2548a179fa1774a5
+Requires: Rcpp, RcppArmadillo, nloptr
 
 Package: evaluate
 Source: CRAN
@@ -316,8 +308,8 @@ Requires: colorspace
 
 Package: nloptr
 Source: CRAN
-Version: 1.0.4
-Hash: 8053df240a4635aeb54fc68c6de67709
+Version: 1.2.1
+Hash: c2b0475b9a177d3331957e366a7059a0
 
 Package: openssl
 Source: CRAN
