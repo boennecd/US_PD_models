@@ -424,7 +424,9 @@ Check the result
 ```{r check_duffie_res}
 #####
 # plot smoothed random effect
-pf_plot_effects <- function(fit, qlvl = pnorm(-1) * 2, ylabs, type = "smoothed_clouds"){
+pf_plot_effects <- function(
+  fit, qlvl = pnorm(-1) * 2, ylabs, type = "smoothed_clouds", x, xlim, 
+  change_par = TRUE){
   stopifnot(type %in% c("smoothed_clouds", "forward_clouds"))
   dp <- if(type != "smoothed_clouds") -1 else TRUE
   o <- list(
@@ -433,18 +435,23 @@ pf_plot_effects <- function(fit, qlvl = pnorm(-1) * 2, ylabs, type = "smoothed_c
                              type = type)[, , dp, drop = FALSE])
   cat(sprintf("%.2f pct. confidence intervals\n", (1 - qlvl) * 100))
   
-  x <- make_ym_inv((min(dat$tstop)):max(dat$tstop))
+  if(missing(x))
+    x <- make_ym_inv((min(dat$tstop)):max(dat$tstop))
   stopifnot(nrow(o$mean) == length(x))
   
-  par_old <- par(no.readonly = TRUE)
-  on.exit(par(par_old))
-  par(mar = c(5, 4, 1, 1))
+  if(change_par){
+    par_old <- par(no.readonly = TRUE)
+    on.exit(par(par_old))
+    par(mar = c(5, 4, 1, 1))
+  }
+  if(missing(xlim))
+    xlim <- range(x)
   for(i in 1:ncol(o$mean)){
     me  <- o$mean[, i]
     lbs <- o$qs[1, i, ]
     ubs <- o$qs[2, i, ]
-    plot(o$mean[, i] ~ x, ylim = range(lbs, ubs, me, na.rm = TRUE), 
-         type = "l", xlab = "Year", ylab = ylabs[i])
+    plot(me ~ x, ylim = range(lbs, ubs, me, na.rm = TRUE), 
+         type = "l", xlab = "Year", ylab = ylabs[i], xlim = xlim)
     nber_poly(TRUE)
     lines(x, lbs, lty = 2)
     lines(x, ubs, lty = 2)
@@ -1316,5 +1323,701 @@ get_plot_device({
 
 </div>
 
+## In-sample
+
+Define function to make in-sample simulation
+
+<div class="hideable">
+
+```{r in_sample_sim, cache=1}
+sim_func <- function(
+  object, n_sim = 10000L, data = dat, id = gvkey_unique, tvar = tstop, 
+  tstop = min(dat$tstop)){
+  stopifnot(any(inherits(object, c("PF_EM", "glm")) > 0))
+  is_pf_em <- inherits(object, "PF_EM")
+  
+  # get data
+  id   <- eval(substitute(id)  , data)
+  tvar <- eval(substitute(tvar), data)
+  
+  if(is_pf_em){
+    # find clouds
+    cl_start <- min(tvar) - tstop + 1L
+    cl <- object$clouds$smoothed_clouds
+    if(cl_start > 1L)
+      cl <- cl[-seq_len(cl_start - 1L)]
+    
+  }
+  
+  # set indicies 
+  tvar_shift <- min(tvar) - 1L
+  tvar_idx <- tvar - tvar_shift
+  
+  # assign covariates and random effect design matrix
+  eta_fix <- 
+    drop(if(is_pf_em) 
+      model.matrix(object$terms$fixed, data) %*% object$fixed_effects else
+        model.matrix(object$terms, data) %*% coef(object))
+  if(is_pf_em) 
+    Z <- model.matrix(object$terms$random, data)
+  
+  t_points <- unique(tvar_idx)
+  o <- lapply(t_points, function(idx){
+    # get subset of data that we need
+    keep <- which(tvar_idx == idx)
+    data_t  <- data   [keep, ]
+    eta_fix <- eta_fix[keep]
+    id      <- id[keep]
+    if(is_pf_em){
+      Z_t     <- Z      [keep, , drop = FALSE]
+      cl_t    <- cl     [[idx]] 
+      ws <- cl_t$weights
+      states <- cl_t$states
+    }
+    
+    # find average default rate
+    y_dist <- replicate(n_sim, {
+      if(is_pf_em){
+        # draw particle
+        p_idx <- sample(length(ws), prob = ws, size = 1L) 
+        part <- states[, p_idx, drop = FALSE]
+        eta <- drop(eta_fix + Z_t %*% part)
+        
+      } else 
+        eta <- eta_fix
+      
+      outcome <- -expm1(-exp(eta)) > runif(length(eta))
+      mean(outcome)
+    })
+    
+    eta_means <- if(is_pf_em) 
+      # compute mean log odds for each firm
+      colSums(t(Z_t %*% states) * drop(ws)) + eta_fix else
+        eta_fix
+    
+    tvar <- idx + tvar_shift
+    list(
+      y_dist = y_dist, tvar = tvar, 
+      pred = data.frame(id = id, tvar = tvar, eta_mean = eta_means))
+  })
+  
+  # gather results and return
+  pred <- do.call(rbind, lapply(o, "[[", "pred"))
+  y_dists <- sapply(o, "[[", "y_dist")
+  colnames(y_dists) <- (y_dist_nam <- sapply(o, "[[", "tvar"))
+  y_dists <- y_dists[, order(y_dist_nam)]
+  
+  list(pred = pred, y_dists = y_dists)
+}
+
+# fit other models to compare with
+duf_fit <- glm(y ~ wz(dtd) + wz(excess_ret) + r1y + log_market_ret, 
+               binomial("cloglog"), dat)
+stopifnot("year_dummy" %in% colnames(dat))
+rng_fix <- update(base_fit, . ~ . + wz(rel_size)*year_dummy)
+
+dat$year  <- as.integer(format(make_ym_inv(dat$tstop), "%Y"))
+dt_sub <- subset(dat, year >= 2000L)
+set.seed(99969118)
+duf_base  <- sim_func(duf_fit , data = dt_sub)
+out_base  <- sim_func(base_fit, data = dt_sub)
+fix_base  <- sim_func(rng_fix, data = dt_sub)
+out_inter <- sim_func(state_rng_inter_large, data = dt_sub)
+out_size  <- sim_func(state_rng_size_restrict_large, data = dt_sub)
+
+rm(sim_func)
+```
+
+Check results
+
+```{r in_sample_sim_illu}
+#####
+# look at AUC
+objs <- list(
+  duf = duf_base, base = out_base, inter = out_inter, size = out_size, 
+  rng_fix = fix_base)
+rocs <- lapply(objs, function(out){
+  library(pROC)
+  tmp <- merge(dat[, c("y", "gvkey_unique", "tstart")], out$pred, 
+               by.x = c("gvkey_unique", "tstart"), by.y = c("id", "tvar"))
+  roc <- with(tmp, roc(y, eta_mean))
+  list(roc = roc, partial = auc(roc, partial.auc = c(1, .9)))  
+})
+
+print(rocs$duf    , digits = 4)
+print(rocs$base   , digits = 4)
+print(rocs$rng_fix, digits = 4)
+print(rocs$inter  , digits = 4)
+print(rocs$size   , digits = 4)
+
+plot(rocs$duf    $roc, col = "darkgray", grid = TRUE)
+plot(rocs$base   $roc, col = "black", add = TRUE)
+plot(rocs$inter  $roc, col = "brown", add = TRUE)
+plot(rocs$inter  $roc, col = "darkblue", add = TRUE)
+plot(rocs$rng_fix$roc, col = "darkblue", lty = 2, add = TRUE)
+
+#####
+# look at default rate distribution
+rates <- lapply(
+  objs, function(out)
+  apply(out$y_dists, 2, quantile, probs = c(.05, .5, .95)))
+
+func <- function(rates = rates, idx){
+  # get name of the index, lower and upper bounds, and the median
+  idx <- deparse(substitute(idx))
+  rts <- rates[[idx]]
+  lbs <- rts[1, ]
+  med <- rts[2, ]
+  ubs <- rts[3, ]
+  
+  # compute realized rates and add color for coverage
+  dt_sub <- subset(dat, tstop %in% colnames(rts), c(y, tstop))
+  y_rea <- tapply(dt_sub$y, dt_sub$tstop, mean)
+  is_cov <- y_rea >= lbs & y_rea <= ubs
+  cat(sprintf("Coverage is %.2f pct.\n", mean(is_cov * 100)))
+  col <- ifelse(is_cov, "DarkGray", "Black")
+  
+  # make plot w/ medians
+  x_vars <- make_ym_inv(as.integer(colnames(rts)))
+  plot(x_vars, med, ylim = range(rts), xlab = "Year",  
+       ylab = paste("Default rate w/", sQuote(idx)), col = col)
+  
+  # add realized 
+  points(x_vars, y_rea, col = col, pch = 4)
+  
+  # add prediction interval
+  arrows(x_vars, lbs, x_vars, ubs, length = 0.05, angle = 90, code = 3, 
+         col = col)
+}
+
+func(rates, duf)
+func(rates, base)
+func(rates, inter)
+func(rates, size)
+func(rates, rng_fix)
+```
+
+Check those with the largest difference
+
+```{r check_w_large_diff}
+local({
+  eta_diff <- out_size$pred$eta_mean - out_base$pred$eta_mean
+  ord <- order(eta_diff)
+  ord <- c(head(ord, 500), tail(ord, 500))
+  
+  # is it time specific?
+  print(lattice::stripplot(
+    out_size$pred$tvar[ord], col = "black", method="jitter", jitter = 1))
+  plot(state_rng_size_restrict_large, cov_index = 1)
+  delta_ts <- c(500, 550, 650) - min(dat$tstart) + 1L
+  sapply(delta_ts, function(x) abline(v = x, lty = 2))
+  
+  set.seed(99969118)
+  ord <- sample(ord, 60L, replace = FALSE)
+  
+  to_check <- out_size$pred[ord, ]
+
+  vs <- all.vars(update(frm_fixed, 1L ~ .))
+  dt <- dat
+  dt[colnames(dt) %in% vs] <- lapply(dt[colnames(dt) %in% vs], 
+                                     function(x) scale(wz(x)))
+  
+  z <- merge(dt, to_check, by.x = c("gvkey_unique", "tstop"), 
+             by.y = c("id", "tvar"))
+  
+  z <- cbind(`eta diff` = eta_diff[ord], z[, c("y", "tstop", vs)], 
+             `eta base` = out_base$pred$eta_mean[ord], 
+             `eta rng`  = out_size$pred$eta_mean[ord])
+  z <- z[order(z$`eta diff`), ]
+  flip <- sapply(z, function(x) is.numeric(x) && !is.integer(x))
+  z[flip] <- lapply(z[flip], signif, digits = 2)
+  
+  cat("Ordered by difference in linear predictor\n")
+  print(z)
+  
+  cat("Ordered by difference time\n")
+  z[order(z$tstop, z$`eta diff`), ]
+})
+```
+
+</div>
+
+## Out-of-sample
+
+Fit models out-of-sample
+
+<div class="hideable">
+
+```{r fit_out_of_sample}
+dat$d_yr <- format(make_ym_inv(dat$tstart), "%Y")
+dat$yr <- as.integer(dat$d_yr)
+yrs <- 1998:(max(dat$yr) - 1L)
+
+ctrl_default_out_of_sample <- PF_control(
+  N_fw_n_bw = 2000L, N_smooth = 1000L, N_first = 2000L, n_max = 1000, 
+  n_threads = n_threads, nu = 8L, covar_fac = 1.2, ftol_rel = 1e-6,
+  smoother = "Fearnhead_O_N", eps = 1e-4, averaging_start = 50L)
+
+do_re_run_expr <- expression(
+  if(exists("do_re_run"))
+    do_re_run else 
+      do_re_run <- as.character(tcltk::tkmessageBox(
+        message = "Do you want to re-run the out-of-sample models?", 
+        type = "yesno")) == "yes")
+
+f1_prefix <- file.path(
+  "markdown", "output", "outsample-state-rng-inter-monthly")
+f2_prefix <- file.path(
+  "markdown", "output", "outsample-state-rng-size-inter-monthly")
+for(y_i in yrs){
+  dat_y <- subset(dat, yr <= y_i)
+  
+  #####
+  # fit model with random intercept
+  f_name <- paste0(f1_prefix, "-", y_i, ".RDS")
+  if(!file.exists(f_name) || eval(do_re_run_expr)){
+    set.seed(54820338)
+    log_n_eval({
+      fit <- PF_EM(
+        fixed = frm_fixed, random = ~ 1, 
+        data = dat_y,
+        model = "cloglog", by = 1L, max_T = max(dat_y$tstop), 
+        id = dat_y$gvkey_unique, 
+        
+        # start close to values from full period as of 2019/03/12
+        Q = diag(0.015, 1), Fmat = diag(0.85, 1), 
+        fixed_effects = c(
+          -11, -0.35, -0.51, -1.3, -1.7, 0.57, -0.81, 97, -1.8, -0.21, 
+          0.074, 0.82, 3.3, 0.98, -0.27, 0.53, -1, -2.1, -3.1, 15),
+        
+        type = "VAR", control = ctrl_default_out_of_sample, 
+        trace = 1L)
+    }, paste0("_outsample-rng-inter-monthly-", y_i))
+    
+    saveRDS(fit, f_name)
+  }
+  
+  #####
+  # fit model with random intercept and size slope
+  f_name <- paste0(f2_prefix, "-", y_i, ".RDS")
+  if(!file.exists(f_name) || eval(do_re_run_expr)){
+    set.seed(54820338)
+    log_n_eval({
+      fit <- PF_EM(
+        fixed = frm_fixed, random = ~ 1 + wz(rel_size), 
+        data = dat_y,
+        model = "cloglog", by = 1L, max_T = max(dat_y$tstop), 
+        id = dat_y$gvkey_unique, 
+        
+        J = diag(1, 2), Q_0 = diag(1, 2),
+        G = matrix(c(1, 0, 
+                     0, 0, 
+                     0, 0, 
+                     0, 1), byrow = TRUE, ncol = 2),  
+        K = matrix(1, 1, 1),
+        
+        # start close to values from full period as of 2019/03/12
+        theta = c(0.97, 0.97), phi = 5.1, psi = c(-1.4, -2.8), 
+        fixed_effects = c(
+          -11, -0.36, -0.53, -1.2, -1.6, 0.55, -0.79, 120, -1.7, -0.25, 
+          0.065, 0.85, -0.95, 0.94, -0.3, 0.51, -1, -2.7, -3.8, 14),
+        
+        type = "VAR", control = ctrl_default_out_of_sample, 
+        trace = 1L)
+    }, paste0("_outsample-rng-size-monthly-inter-", y_i))
+    
+    saveRDS(fit, f_name)
+  }
+}
+```
+
+</div>
+
+Load and check result
+
+<div class="hideable">
+
+```{r check_fit_out_of_sample}
+# find the files
+fs <- list.files(file.path("markdown", "output"), full.names = TRUE)
+inter_ms <- fs[grepl("outsample\\-state\\-rng\\-inter\\-monthly", fs)]
+size_inter_ms <- fs[grepl("outsample\\-state\\-rng\\-size\\-inter\\-monthly", fs)]
+
+# add the years
+names(inter_ms) <- gsub("(.+)(\\d{4})(\\.RDS)$", "\\2", inter_ms)
+names(size_inter_ms) <- gsub("(.+)(\\d{4})(\\.RDS)$", "\\2", size_inter_ms)
+
+# load the objects
+inter_ms <- lapply(inter_ms, readRDS)
+size_inter_ms <- lapply(size_inter_ms, readRDS)
+
+# check that they all converged
+par(mar = c(5, 4, .5, .5), mfcol = c(2, 2))
+for(o in names(inter_ms))
+  plot(inter_ms[[o]]$log_likes, ylab = o, type = "l")
+for(o in names(size_inter_ms))
+  plot(size_inter_ms[[o]]$log_likes, ylab = o, type = "l")
+
+# quickly check coefficients
+x <- signif(sapply(inter_ms, "[[", "fixed_effects"), 4)
+x["(Intercept)", ]
+# scale by standard deviations
+sds <- apply(model.matrix(tail(inter_ms)[[1L]]$terms$fixed, dat), 2, sd)
+sds["(Intercept)"] <- NA
+round(x <- t(x * sds)           , 1)
+round(z <- t(t(x) - colMeans(x)), 1)
+matplot(z, type = "l", lty = 1)
+
+sqrt(sapply(inter_ms, "[[", "Q"))
+sapply(inter_ms, "[[", "F")
+
+x <- signif(sapply(size_inter_ms, "[[", "fixed_effects"), 4)
+x["(Intercept)", ]
+# scale by standard deviations
+sds <- apply(
+  model.matrix(tail(size_inter_ms)[[1L]]$terms$fixed, dat), 2, sd)
+sds["(Intercept)"] <- NA
+round(x <- t(x * sds)           , 1)
+round(z <- t(t(x) - colMeans(x)), 1)
+matplot(z, type = "l", lty = 1)
+
+sapply(size_inter_ms, "[[", "Q")
+sqrt(sapply(lapply(size_inter_ms, "[[", "Q"), diag))
+sapply(size_inter_ms, "[[", "theta")
+
+ll1 <- sapply(inter_ms     , logLik)
+ll2 <- sapply(size_inter_ms, logLik)
+par(mar = c(5, 4, .5, .5), mfcol = c(1, 1))
+plot(ll2 - ll1, ylim = range(0, ll2 - ll1))
+
+# plot smoothed particles
+par(mar = c(5, 4, .5, .5), mfcol = c(2, 2))
+local({
+  min_x  <- min(as.integer(dat$tstart))
+  min_yr <- as.integer(format(make_ym_inv(min_x), "%Y"))
+  x_lim  <- range(make_ym_inv(dat$tstart))
+  
+  for(o in as.integer(names(inter_ms))){
+    x <- make_ym_inv(min_x:((o - min_yr) * 12L + min_x + 11L))
+    pf_plot_effects(
+      inter_ms[[as.character(o)]], x = x, ylabs = "Intercept", 
+      xlim = x_lim, change_par = FALSE)
+  }
+  
+  for(o in as.integer(names(size_inter_ms))){
+    x <- make_ym_inv(min_x:((o - min_yr) * 12L + min_x + 11L))
+    pf_plot_effects(
+      size_inter_ms[[as.character(o)]], x = x, xlim = x_lim,
+      ylabs = c("Intercept", get_label("rel_size")), change_par = FALSE)
+  }
+})
+
+# plot effective sample size of forward particle filter
+par(mar = c(5, 4, .5, .5), mfcol = c(2, 2))
+local({
+  for(o in inter_ms)
+    plot(o$effective_sample_size$forward_clouds, type = "h", 
+         ylim = range(0, o$effective_sample_size$forward_clouds))
+  
+  for(o in size_inter_ms)
+    plot(o$effective_sample_size$forward_clouds, type = "h", 
+         ylim = range(0, o$effective_sample_size$forward_clouds))
+})
+```
+
+</div>
+
+Forecast outcomes with models with frailty
+
+<div class="hideable">
+
+<!-- 
+  knitr::opts_knit$set(output.dir = ".")
+  knitr::load_cache(
+      "forecast", 
+      path = paste0(file.path("markdown", "cache", "rng-effects"), 
+                    .Platform$file.sep))
+--> 
+
+```{r forecast, cache = 1}
+# assign function to perform the simulation
+forecast_func <- function(
+  fit, y_i, n_outer = 10000L, n_inner = 10L, cl, idvar = gvkey, tvar = tstop){
+  stopifnot(is.integer(y_i), is.integer(n_outer), is.integer(n_inner), 
+            n_outer > 0L, n_inner > 0L, inherits(fit, c("PF_EM", "glm")))
+  
+  is_glm <- inherits(fit, "glm")
+  if(is_glm)
+    stopifnot(
+      fit$family$family == "binomial", fit$family$link == "cloglog") else
+      stopifnot(fit$call$model == "cloglog")
+  
+  # get data. `y_i` is the year up to which we use to estimate the model 
+  # so we increament by one
+  y_i <- y_i + 1L
+  dat_y <- subset(dat, yr == y_i)
+  
+  # get id and time variable
+  id <- eval(substitute(idvar), dat_y)
+  ti <- eval(substitute(tvar) , dat_y)
+  ti <- ti - min(ti) + 1L
+  # check that data is sorted
+  stopifnot(!is.unsorted(id), all(!tapply(ti, id, is.unsorted)))
+  
+  ti_unique <- unique(ti)
+  # time points should be consecutive
+  stopifnot(all(diff(ti_unique) == 1L))
+  
+  # get design matrices
+  if(is_glm){
+    phat <- predict(fit, dat_y, type = "response")
+    clusterExport(
+      cl, c("phat", "id", "ti", "ti_unique", "n_inner", "is_glm"), 
+      environment())
+    
+  } else {
+    eta <- drop(model.matrix(fit$terms$fixed, dat_y) %*% fit$fixed_effects)
+    Z <- model.matrix(fit$terms$random, dat_y)
+    cloud <- tail(fit$clouds$forward_clouds, 1)[[1L]]
+    F. <- fit$F
+    Q_chol <- t(chol(fit$Q))
+  
+    clusterExport(
+      cl, c("eta", "Z", "cloud", "F.", "Q_chol", "id", "ti", "ti_unique", 
+            "n_inner"), environment())
+    
+  }
+  
+  # simulate states, compute probabilities, and simulate outcomes
+  out <- parLapply(cl, 1:n_outer, function(...){
+    if(!is_glm){
+      # draw parent
+      idx <- sample.int(length(cloud$weights), 1L, prob = cloud$weights)
+      parent <- cloud$states[, idx, drop = FALSE]
+      
+      # simulate path 
+      q <- nrow(parent)
+      n <- length(ti_unique)
+      path <- replicate(n, Q_chol %*% rnorm(q), simplify = FALSE)
+      path <- Reduce(
+        function(x, y) y + F. %*% x, path, init = parent, accumulate = TRUE)
+      path <- if(!is.list(path))
+        matrix(path, 1L) else do.call(cbind, path)
+      
+      # compute default probabilities, simulate outcomes, and simulate industry 
+      # wide default rate
+      log_haz <- rep(NA_real_, length(eta))
+      for(t. in ti_unique){
+        idx <- which(ti == t.)
+        log_haz[idx] <- Z[idx, , drop = FALSE] %*% path[, t.]
+      }
+      stopifnot(!anyNA(log_haz))
+      log_haz <- log_haz + eta
+     
+      phat <- -expm1(-exp(log_haz)) 
+    }
+    
+    # compute probability of default over the whole period. It ignores 
+    # missing intermediary values due to missing covariates and potentially
+    # recurrent events within the same year
+    phat <- tapply(
+      phat, id, Reduce, f = function(x, y) x + (1 - x) * y, init = 0.)
+    id_out <- names(phat)
+    
+    Y <- replicate(n_inner, phat > runif(length(phat)))
+    Y_bar <- colMeans(Y)
+    
+    list(phat = if(is_glm) NULL else phat, id_out = id_out, Y_bar = Y_bar)
+  })
+  
+  # gather default rates for individuals, compute the means, and gather the 
+  # industry wide default rates
+  phat <- if(!is_glm)
+    rowMeans(sapply(out, "[[", "phat")) else 
+      tapply(phat, id, Reduce, f = function(x, y) x + (1 - x) * y, init = 0.)
+  id_out <- out[[1L]]$id_out
+  Y_bar <- c(sapply(out, "[[", "Y_bar"))
+  
+  # compute realized event counter for individuals
+  event_count <- tapply(dat_y$y, id, sum)
+  stopifnot(# id indices match 
+    all(names(event_count) == id_out))
+  
+  # how many observations do we have after an event and how many firms have 
+  # more than one event? We pose these questions as we assume that an 
+  # event is an absorbing state in the short term in the above code
+  cum_event_count <- sapply(
+    tapply(dat_y$y, id, cumsum), function(x) x[-length(x)] > 0L)
+  cat(sprintf(
+    "%.2f pct. observations are after an event and we have %3d firms with more than one event\n", 
+    mean(unlist(cum_event_count)) * 100, sum(event_count > 1L)))
+  
+  list(
+    Y_bar = Y_bar, phat = phat, id_out = id_out, event_count = event_count)
+}
+
+# use function
+library(parallel)
+cl <- makeCluster(6L)
+set.seed(64010384)
+clusterSetRNGStream(cl)
+
+inter_ms_forceast <- mapply(
+  forecast_func, fit = inter_ms, SIMPLIFY = FALSE, MoreArgs = list(cl = cl),
+  y_i = as.integer(names(inter_ms)))
+size_inter_ms_forceast <- mapply(
+  forecast_func, fit = size_inter_ms, SIMPLIFY = FALSE, 
+  MoreArgs = list(cl = cl), y_i = as.integer(names(size_inter_ms)))
+
+stopCluster(cl)
+```
+
+</div>
+
+Do the same for models without frailty
+
+<div class="hideable">
+
+<!--
+  knitr::opts_knit$set(output.dir = ".")
+  knitr::load_cache(
+      "out_sample_no_frailty", 
+      path = paste0(file.path("markdown", "cache", "rng-effects"), 
+                    .Platform$file.sep))
+-->
+
+```{r out_sample_no_frailty, cache = 1}
+# define function to fit models and use previous defined function to simulate
+# the predicted default rate and more
+out_sample_glm <- function(frm, cl, n_outer = 10000L, n_inner = 10L){
+  yrs <- 1998:(max(dat$yr) - 1L)
+  
+  out <- lapply(yrs, function(y_i){
+    # fit model
+    fit <- glm(
+      frm, family = binomial("cloglog"), data = subset(dat, yr <= y_i))
+    
+    # forecast
+    out <- forecast_func(
+      fit = fit, y_i = y_i, n_outer = n_outer, n_inner = n_inner, cl = cl)
+    c(out, list(coef = coef(fit)))
+  })
+  
+  names(out) <- yrs
+  out
+}
+
+# use function
+library(parallel)
+cl <- makeCluster(6L)
+set.seed(64010384)
+clusterSetRNGStream(cl)
+
+frm_simple <- y ~ wz(dtd) +  wz(excess_ret) + log_market_ret + r1y
+duffie_et_al <- out_sample_glm(frm_simple, cl)
+base_fit_outsample <- out_sample_glm(frm, cl)
+
+stopCluster(cl) 
+rm(out_sample_glm)
+```
+
+Check results
+
+```{r check_out_sample_no_frailty}
+# coefficients
+signif(x <- do.call(cbind, lapply(duffie_et_al, "[[", "coef")), 2)
+signif(x <- do.call(cbind, lapply(base_fit_outsample, "[[", "coef")), 2)
+```
+
+</div>
+
+Illustrate results
+
+<div class="hideable">
+
+```{r out_of_sample_illustrations}
+#####
+# Make plots and figures. Start by getting figures
+objs <- list(
+  `Duffie et al.`          = duffie_et_al, 
+  `No frailty`             = base_fit_outsample,
+  `Frailty: inter`         = inter_ms_forceast, 
+  `Frailty: inter & slope` = size_inter_ms_forceast) 
+stopifnot(all(sapply(objs[-1L], length) == length(objs[[1L]])), 
+          all(sapply(objs[-1L], names) == names(objs[[1L]])))
+
+yrs <- as.integer(names(objs[[1L]])) + 1L
+forecast_summary <- lapply(seq_along(yrs), function(i){ 
+  # check that indices match
+  y_i <- yrs[i]
+  objs_i <- lapply(objs, "[[", i)
+  indices <- lapply(objs_i, "[[", "id_out")
+  stopifnot(all(
+    sapply(indices[-1], function(z) all(indices[[1L]] == z))))
+  
+  # compute AUCs
+  y_realized <- objs_i[[1L]]$event_count > 0L
+  library(pROC)
+  aucs <- sapply(objs_i, function(x) c(auc(y_realized, x$phat)))
+  
+  # computed predicted industry default rate quantiles
+  default_rate_dist <- sapply(objs_i, function(x) 
+    quantile(x$Y_bar, c(.05, .5, .95)))
+  
+  # compute realized industry default rate
+  realized_default_rate <- mean(y_realized)
+  
+  list(aucs = aucs, default_rate_dist = default_rate_dist, 
+       realized_default_rate = realized_default_rate, y_i = y_i)
+})
+
+#####
+# plot of default rate distributions
+xs <- sapply(forecast_summary, "[[", "y_i") + 1L +
+  (month(make_ym_inv(min(dat$tstart))) - 1L) / 12
+realized_default_rate <- 
+  sapply(forecast_summary, "[[", "realized_default_rate")
+qs <- lapply(forecast_summary, "[[", "default_rate_dist")
+
+n_models <- ncol(qs[[1L]])
+xs_i <- outer(seq(-.2, .2, length.out = n_models), xs, "+")
+
+get_plot_device({
+  par(mar = c(5, 4, .5, .5))
+  plot(
+    xs, realized_default_rate, ylim = range(unlist(qs), realized_default_rate), 
+    xlab = "(Year - 1, Year]", ylab = "Default rate", pch = 4, 
+    xlim = range(xs_i))
+  
+  pch <- c(5, 6, 17, 18)
+  for(i in seq_along(qs)){
+    xs_i_j <- xs_i[, i]
+    qs_j <- qs[[i]]
+    
+    arrows(xs_i_j, qs_j[1, ], xs_i_j, qs_j[3, ], length = 0.05, angle = 90, 
+           code = 3, col = "DarkGray")
+    points(xs_i_j, qs_j[2, ], pch = pch)
+  }
+  
+  nber_poly()
+}, "default-rate-out-sample-monthly")
+
+#####
+# AUC
+out_auc <- sapply(forecast_summary, "[[","aucs")
+xs_i <- outer(seq(-.2, .2, length.out = n_models), xs, "+")
+
+func <- function(y, ylab){
+  plot(xs_i, y, type = "n", ylim = range(y, 1), ylab = "AUC", 
+       xlab = "(Year - 1, Year]")
+  for(i in 1:n_models)
+    points(xs_i[i, ], y[i, ], pch = pch[i])
+  nber_poly()
+}
+
+get_plot_device(func(out_auc), "auc-out-sample-monthly")
+```
+
+</div>
 
 ## References

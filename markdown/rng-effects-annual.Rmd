@@ -862,7 +862,7 @@ for(y_i in yrs){
   #####
   # fit model with random intercept
   f_name <- paste0(f1_prefix, "-", y_i, ".RDS")
-  if(!file.exists(f_name) | eval(do_re_run_expr)){
+  if(!file.exists(f_name) || eval(do_re_run_expr)){
     set.seed(54820338)
     log_n_eval({
       fit <- PF_EM(
@@ -887,7 +887,7 @@ for(y_i in yrs){
   #####
   # fit model with random intercept and size slope
   f_name <- paste0(f2_prefix, "-", y_i, ".RDS")
-  if(!file.exists(f_name) | eval(do_re_run_expr)){
+  if(!file.exists(f_name) || eval(do_re_run_expr)){
     set.seed(54820338)
     log_n_eval({
       fit <- PF_EM(
@@ -1053,7 +1053,7 @@ forecast_func <- function(fit, y_i, n_sim = 10000L, cl){
             inherits(fit, "PF_EM"), 
             fit$call$model == "exponential")
   
-  # get data. `y_i` is the year up to which we use to estimate the model uses 
+  # get data. `y_i` is the year up to which we use to estimate the model 
   # so we increament by one
   y_i <- y_i + 1L
   dat_y <- subset(dat_con, yr == y_i)
