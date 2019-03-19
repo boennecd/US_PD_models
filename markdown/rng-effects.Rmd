@@ -737,6 +737,64 @@ print(state_rng_inter_LL <-
 
 </div>
 
+Get approximate negative observed information matrix
+
+<div class="hideable"> 
+
+<!-- 
+  knitr::opts_knit$set(output.dir = ".")
+  knitr::load_cache(
+      "sd_rng", 
+      path = paste0(file.path("markdown", "cache", "rng-effects"), 
+                    .Platform$file.sep))
+--> 
+
+```{r sd_rng, cache = 1}
+get_approx_info_n_score <- function(fit){
+  # First check variance of estimates
+  ex <- local({
+    set.seed(26217670)
+    ex <- replicate(10, {
+      tmp <- fit
+      rnorm(1)
+      tmp$seed <- .Random.seed
+      o <- PF_get_score_n_hess(tmp, use_O_n_sq = TRUE)
+      o$set_n_particles(N_fw = 1000L, N_first = 5000L)
+      o$get_get_score_n_hess()
+    }, simplify = FALSE)
+    
+    z <- sapply(ex, function(x) sqrt(diag(solve(x$observation$neg_obs_info))))
+    cat("Approximations\n")
+    print(z)
+    cat("Means\n")
+    print(zm <- rowMeans(z))
+    cat("Standard deviations\n")
+    print(apply(z, 1, sd))
+    
+    cat("Comparison with model without random effects\n")
+    print(cbind(rng = zm, `non-rng` = sqrt(diag(vcov(base_fit)))))
+    
+    ex
+  })
+  
+  # then make final run we will use
+  o <- PF_get_score_n_hess(fit, use_O_n_sq = TRUE)
+  o$set_n_particles(N_fw = 5000L, N_first = 10000L)
+  o$get_get_score_n_hess()
+}
+
+state_rng_inter_derivs <- get_approx_info_n_score(state_rng_inter_large)
+```
+
+```{r show_sd_rng}
+solve(state_rng_inter_derivs$state$neg_obs_info)
+sqrt(diag(solve(state_rng_inter_derivs$state$neg_obs_info)))
+
+sqrt(diag(solve(state_rng_inter_derivs$observation$neg_obs_info)))
+```
+
+</div>
+
 ### Model with a random relative size slope
 
 Fit model
@@ -895,43 +953,28 @@ local({
 
 </div>
 
-Get standard errors
+Get approximate negative observed information matrix
 
 <div class="hideable"> 
 
-```{r sd_w_size_state_rng, eval = FALSE, echo = FALSE}
-# First check variance of estimates
-ex <- local({
-  set.seed(26217670)
-  ex <- replicate(10, {
-    tmp <- state_rng_size_restrict_large
-    rnorm(1)
-    tmp$seed <- .Random.seed
-    o <- PF_get_score_n_hess(tmp, use_O_n_sq = TRUE)
-    o$set_n_particles(N_fw = 1000L, N_first = 5000L)
-    o$get_get_score_n_hess()
-  }, simplify = FALSE)
-  
-  z <- sapply(ex, function(x) sqrt(diag(solve(x$observation$neg_obs_info))))
-  print(z)
-  print(zm <- rowMeans(z))
-  print(apply(z, 1, sd))
-  
-  print(cbind(rng = zm, `non-rng` = sqrt(diag(vcov(base_fit)))))
-  
-  ex
-})
+<!-- 
+  knitr::opts_knit$set(output.dir = ".")
+  knitr::load_cache(
+      "sd_w_size_rng", 
+      path = paste0(file.path("markdown", "cache", "rng-effects"), 
+                    .Platform$file.sep))
+--> 
 
-# then make final run we will use
-state_rng_size_restrict_derivs <- local({
-  o <- PF_get_score_n_hess(state_rng_size_restrict_large, use_O_n_sq = TRUE)
-  o$set_n_particles(N_fw = 5000L, N_first = 10000L)
-  o$get_get_score_n_hess()
-})
+```{r sd_w_size_rng, cache = 1}
+state_rng_size_derivs <- 
+  get_approx_info_n_score(state_rng_size_restrict_large)
+```
 
-sqrt(diag(solve(state_rng_size_restrict_derivs$observation$neg_obs_info)))
-sqrt(diag(solve(
-  state_rng_size_restrict_derivs$state$neg_obs_info)))
+```{r show_sd_w_size_rng}
+solve(state_rng_size_derivs$state$neg_obs_info)
+sqrt(diag(solve(state_rng_size_derivs$state$neg_obs_info)))
+
+sqrt(diag(solve(state_rng_size_derivs$observation$neg_obs_info)))
 ```
 
 </div>
@@ -1189,6 +1232,10 @@ local({
   labs <- attr(state_rng_inter_large$terms$fixed, "term.labels")
   labs <- c("(Intercept)", labs)
   
+  vcovs <- list(
+    solve(state_rng_inter_derivs$observation$neg_obs_info),
+    solve(state_rng_size_derivs$observation$neg_obs_info))
+  
   # re-order terms
   assg <- 
     attr(model.matrix(state_rng_inter_large$terms$fixed, dat), "assign") + 1L
@@ -1204,14 +1251,28 @@ local({
   i_new <- unlist(sapply(i_new, function(x) which(assg == x)))
   betas <- betas[i_new, ]
   assg <- assg[i_new]
+  vcovs <- lapply(vcovs, "[", i = i_new, j = i_new)
   labs <- o
   
-  do_drop <- duplicated(assg)
+  # compute p-values
+  pvs <- lapply(unique(assg), function(a){
+    idx <- which(assg == a)
+    df_term <- length(idx)
+    x  <- betas[idx, , drop = FALSE]
+    cv <- lapply(vcovs, "[", i = idx, j = idx, drop = FALSE)
+    chi_vals <- mapply(
+      function(cvmat, b) drop(b %*% solve(cvmat, b)), 
+      cvmat = cv, b = split(x, rep(1:ncol(x), each = nrow(x))))
+    cbind(stat = chi_vals, df = df_term, 
+          p = pchisq(chi_vals, df = df_term, lower.tail = FALSE))
+  })
+  names(pvs) <- labs
+  stats <- t(sapply(pvs, "[", i = TRUE, j = "stat"))
+  pvals <- t(sapply(pvs, "[", i = TRUE, j = "p"))
   
-  betas # print before
+  do_drop <- duplicated(assg)
   betas <- betas[!do_drop, ]
   rownames(betas) <- labs
-  betas # print after
   
   # blank those out with more than one term
   betas[table(assg) > 1L, ] <- NA_real_
@@ -1233,18 +1294,30 @@ local({
   
   #####
   # make table
-  t_arg <- "S[table-format=-1.3,table-space-text-pre={*}]"
+  t_arg <- paste(
+    "S[table-format=-2.3 ,table-alignment=right]@{}", 
+    "@{}l", 
+    "S[table-format=2.3,table-space-text-pre={*}, table-space-text-post={-*}]", 
+    sep = "\n")
   cmark <- "{\\makecell[r]{\\checkmark}}"
   
   nm <- 2L
   cat(
     "\\begin{tabular}{l\n", paste0(rep(t_arg, nm), collapse = "\n"), "}\n",
     sep = "", "\\toprule\n", 
-    "& ", paste0("\\multicolumn{1}{c}{(", 
-                 tolower(as.roman(1:nm)), ")}", collapse = " & "), "\\\\\n", 
+    "& ", paste0("\\multicolumn{3}{c}{$\\mathcal{M}_", 
+                 1:nm + 3L, "$}", collapse = " & "), "\\\\\n", 
     "\\midrule\n")
   
   # fixed effect coefficients
+  get_pstart <- function(x, p){
+    s <- ifelse(
+      p > .1 | is.na(p), "", ifelse(
+        p > .05, "$^{*}$", ifelse(
+          p > .01, "$^{**}$", "$^{***}$")))
+    
+    ifelse(is.na(x), " & ", paste0(x, " & ",  s))
+  }
   for(i in 1:nrow(betas)){
     # row name
     na <- rownames(betas)[i]
@@ -1259,12 +1332,15 @@ local({
         paste0(get_label(na), " (spline)") else 
           get_label(na)
     }
+    na <- gsub("\\*", "$\\\\cdot$", na)
     
     cat(na, "& ")
     z <- betas[i, ]
-    cat(paste0(
-      ifelse(is.na(z), cmark, sprintf("%.3f", z)), collapse = " & "), 
-      "\\\\\n")
+    z <- ifelse(is.na(z), cmark, sprintf("%.3f", z))
+    z <- get_pstart(z, pvals[i, ])
+    test_stats <- sprintf("(%.1f)", stats[i, ])
+    cat(rbind(z, test_stats), sep = " & ")
+    cat(" \\\\\n")
   }
   cat("\\midrule\n")
   
@@ -1279,19 +1355,19 @@ local({
   for(i in 1:nrow(fra_params)){
     z <- fra_params[i, ]
     cat(rownames(fra_params)[i], "&", paste0(
-      ifelse(is.na(z), "", sprintf("%.3f", z)), collapse = " & "), 
+      ifelse(is.na(z), "", sprintf("%.3f", z)), collapse = " & & & "), 
       "\\\\\n")
   }
   cat("\\midrule\n")
   
   # summary stats
   cat("AIC", "&", paste0(
-    sprintf("%.1f", rest["AIC", ]) , collapse = " & "), "\\\\\n")
+    sprintf("%.1f", rest["AIC", ]) , collapse = " & & & "), "\\\\\n")
   cat("log-likelihood", "&", paste0(
-    sprintf("%.1f", rest["log-likelihood", ]) , collapse = " & "), "\\\\\n")
-  
+    sprintf("%.1f", rest["log-likelihood", ]) , collapse = " & & & "), 
+    "\\\\\n")
   cat("Number of firms", "&", paste0(
-    sprintf("%d", rest["# firms", ]) , collapse = " & "), "\\\\\n")
+    sprintf("%d", rest["# firms", ]) , collapse = " & & & "), "\\\\\n")
   
   cat("\\bottomrule\n\\end{tabular}")
 })

@@ -913,22 +913,18 @@ Create coefficient table
 
 <div class="hideable">
 
-```{r get_coef_table_input, cache = 1, dependson=c("fit_duf", "add_inter", "winz")}
-coef_tbl_input <- (function(...){
-  objs <- list(...)
-  names(objs) <- names(match.call()[-1L])
-  
-  lapply(objs, function(x){
+```{r get_coef_table_input}
+coef_tbl_input <- lapply(
+  list(duffie = duf, only_lin = f0, final = i0), 
+  function(x){
     tr = terms(x)
     list(
       coef = coef(x), 
-      coef_tbl = summary(x)$coefficient, 
-      drop1 = drop1(x, scope = attr(tr, "term.labels"), test = "LRT"), 
+      vcov = vcov(x),
       terms = tr, 
       logLik = logLik(x),
       AIC = AIC(x))
-  })
-})(duffie = duf, only_lin = f0, final = i0)
+})
 ```
 
 ```{r make_coef_table}
@@ -949,16 +945,24 @@ coef_tbl <- lapply(coef_tbl_input, function(x){
   ma <- match(labs, all_coefs)
   stopifnot(!anyNA(ma))
   
-  # insert coefficient and z-stats for those terms with one degree of freedom 
+  # insert coefficients
   asg <- attr(model.matrix(x$terms, dat), "assign") + 1L
-  mult_col     <- x$drop1[, "Df"] > 1L
+  mult_col <- logical(length(ma))
+  mult_col[unique(asg[duplicated(asg)])] <- TRUE
   mult_col[1L] <- FALSE
-  out[ma[!mult_col], ] <- x$coef_tbl[
-    !asg %in% which(mult_col), c("Estimate", "z value", "Pr(>|z|)")] 
+  out[ma[!mult_col], "Estimate"] <- x$coef[!asg %in% which(mult_col)] 
   
-  # only insert likelihood ratio test statistic and p-value for the remaining
-  out[ma[mult_col], c("Test statistic", "p-value")] <- 
-    cbind(x$drop1$LRT[mult_col], x$drop1$`Pr(>Chi)`[mult_col])
+  # make Wald test and add test statistics and p-values
+  dfs <- table(asg)
+  test_stat <- mapply(
+    function(b, cv) drop(b %*% solve(cv, b)), 
+    b = split(x$coef, asg), 
+    cv = lapply(unique(asg), function(i){
+      idx <- which(i == asg) 
+      x$vcov[idx, idx, drop = FALSE]
+    }))
+  out[ma, c("Test statistic", "p-value")] <- cbind(
+    test_stat, pchisq(test_stat, dfs, lower.tail = FALSE))
   
   # Add AIC and log-likelihood 
   out <- rbind(
@@ -993,8 +997,8 @@ local({
     "\\begin{tabular}{l\n", 
     paste(rep(t_arg, nm), sep = "\n"), "}\n", sep = "", 
     "\\toprule\n", 
-    "& ", paste0("\\multicolumn{3}{c}{(", 
-                 tolower(as.roman(1:nm)), ")}", collapse = " & "), "\\\\\n", 
+    "& ", paste0("\\multicolumn{3}{c}{$\\mathcal{M}_", 
+                 1:nm, "$}", collapse = " & "), "\\\\\n", 
     "\\midrule\n")
   
   #####
@@ -1021,6 +1025,7 @@ local({
         paste0(get_label(na), " (spline)") else 
           get_label(na)
     }
+    na <- gsub("\\*", "$\\\\cdot$", na)
     
     cat(na, "& ")
     
@@ -1028,7 +1033,7 @@ local({
     z <- sapply(coef_tbl, "[", i = i, j = TRUE)
     
     z_t <- z["Test statistic", ]
-    z_t <- ifelse(is.na(z_t), "", sprintf("(%.3f)", z_t))
+    z_t <- ifelse(is.na(z_t), "", sprintf("(%.1f)", z_t))
     
     z_e <- z["Estimate", ]
     z_e <- ifelse(!is.na(z_e), sprintf("%.3f", z_e),  
