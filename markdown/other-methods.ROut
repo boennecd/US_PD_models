@@ -1,0 +1,992 @@
+
+R version 3.5.3 (2019-03-11) -- "Great Truth"
+Copyright (C) 2019 The R Foundation for Statistical Computing
+Platform: x86_64-pc-linux-gnu (64-bit)
+
+R is free software and comes with ABSOLUTELY NO WARRANTY.
+You are welcome to redistribute it under certain conditions.
+Type 'license()' or 'licence()' for distribution details.
+
+  Natural language support but running in an English locale
+
+R is a collaborative project with many contributors.
+Type 'contributors()' for more information and
+'citation()' on how to cite R or R packages in publications.
+
+Type 'demo()' for some demos, 'help()' for on-line help, or
+'help.start()' for an HTML browser interface to help.
+Type 'q()' to quit R.
+
+> #####
+> # set directory
+> local({
++   wd <- getwd()
++   if(!grepl("US_PD_models$", wd)){
++     cat("Changing directory...\n")
++     reg_e <- "(.+)(US_PD_models)(.+)"
++     stopifnot(grepl(reg_e, wd))
++     setwd(gsub(reg_e, "\\1\\2", wd))
++   }
++ })
+> 
+> #####
+> # setup plot device and assign function to save output (after asking)
+> pdf(file.path("markdown", "fig", "other-methods-%03d.pdf"), onefile = FALSE)
+> library(tcltk)
+> saveRDS_ask <- function(object, file){
++   save <- !file.exists(file) || 
++     tclvalue(tkmessageBox(
++       title = "Save?", message = "Want to save", type = "yesno")) == "yes"
++   
++   if(save){
++     cat("Saving...\n")
++     saveRDS(object, file)
++     return(invisible())
++     
++   }
++   
++   cat("Not saving...\n")
++ }
+> 
+> ##### 
+> # source script to setup data
+> source(knitr::purl(file.path("markdown", "setup.Rmd"), output = tempfile()))
+
+
+processing file: markdown/setup.Rmd
+  |                                                                         |                                                                 |   0%  |                                                                         |.....                                                            |   8%  |                                                                         |..........                                                       |  15%  |                                                                         |...............                                                  |  23%  |                                                                         |....................                                             |  31%  |                                                                         |.........................                                        |  38%  |                                                                         |..............................                                   |  46%  |                                                                         |...................................                              |  54%  |                                                                         |........................................                         |  62%  |                                                                         |.............................................                    |  69%  |                                                                         |..................................................               |  77%  |                                                                         |.......................................................          |  85%  |                                                                         |............................................................     |  92%  |                                                                         |.................................................................| 100%
+output file: /tmp/Rtmpg7lDqV/file6bf01985216
+
+
+> wz <- function(x, probs = c(0.01, 0.99), lb = NULL, 
++     ub = NULL, do_scale = FALSE, scale = NULL, do_center = FALSE, 
++     mu = NULL) {
++     if (is.null(lb)) 
++         lb <- unname(quantile(x, probs[1]))
++     if (is.null(ub)) 
++         ub <- unname(quantile(x, probs[2]))
++     x <- pmin(pmax(x, lb), ub)
++     if (is.null(scale)) 
++         scale <- sd(x)
++     if (is.null(mu)) 
++         mu <- mean(x)
++     if (do_center) 
++         x <- x - mu
++     if (do_scale) 
++         x <- x/scale
++     structure(x, lb = lb, ub = ub, class = "wz", scale = scale, 
++         do_scale = do_scale, do_center = do_center, mu = mu)
++ }
+
+> makepredictcall.wz <- function(var, call) {
++     if (as.character(call)[1] != "wz") 
++         return(call)
++     at <- attributes(var)[c("lb", "ub", "scale", "do_scale", 
++         "do_center", "mu")]
++     xxx <- call[1:2]
++     xxx[names(at)] <- at
++     xxx
++ }
+
+> local({
++     set.seed(48350025)
++     df <- data.frame(y = rnorm(100), x = rnorm(100, 1, sd = 2))
++     f <- lm(y ~ wz(x), df)
++     mm <- model.matrix(f)
++     stopifnot(min(mm[, 2]) == quantile(df$x, 0.01), max(mm[, 
++         2]) == quantile(df$x, 0.99))
++     stopifnot(predict(f, newdata = df)[1:10] == predict(f, newdata = df[1:10, 
++         ]))
++     f <- lm(y ~ wz(x, do_scale = TRUE), df)
++     mm <- model.matrix(f)
++     stopifnot(isTRUE(all.equal(sd(mm[, 2]), 1)), predict(f, newdata = df)[1:10] == 
++         predict(f, newdata = df[1:10, ]))
++     f <- lm(y ~ wz(x, do_scale = TRUE, do_center = TRUE), df)
++     mm <- model.matrix(f)
++     stopifnot(isTRUE(all.equal(sd(mm[, 2]), 1)), isTRUE(all.equal(mean(mm[, 
++         2]), 0)), predict(f, newdata = df)[1:10] == predict(f, 
++         newdata = df[1:10, ]))
++ })
+
+> sp_w_c <- function(x, df = NULL, lb = NULL, ub = NULL, 
++     probs = c(0.01, 0.99), Boundary.knots = NULL, knots = NULL, 
++     Z = NULL, do_excl_slope = TRUE, do_center = FALSE, mu = NULL) {
++     x <- wz(x, lb = lb, ub = ub, do_center = do_center, mu = mu, 
++         probs = probs, do_scale = FALSE)
++     lb <- attr(x, "lb")
++     ub <- attr(x, "ub")
++     do_center <- attr(x, "do_center")
++     mu <- attr(x, "mu")
++     if (is.null(knots) | is.null(Boundary.knots)) {
++         qs <- switch(df - 1, `4` = 0.5, `5` = c(0.1, 0.9), `6` = c(0.1, 
++             0.5, 0.9), `7` = c(0.05, 0.35, 0.65, 0.95), `8` = c(0.05, 
++             0.275, 0.5, 0.725, 0.95), `9` = c(0.05, 0.23, 0.41, 
++             0.59, 0.77, 0.95), `10` = c(0.025, 0.1833, 0.3417, 
++             0.5, 0.6583, 0.8167, 0.975), seq(0, 1, length.out = df + 
++             1)[-c(1, df + 1)])
++         if (length(qs) == 0 | (!qs[1] == 0 && !tail(qs, 1) == 
++             1)) 
++             qs <- c(0, qs, 1)
++         knots_use <- quantile(x, qs)
++         if (is.null(Boundary.knots)) 
++             Boundary.knots <- c(knots_use[1], knots_use[length(knots_use)])
++         if (is.null(knots)) 
++             knots <- knots_use[-c(1, length(knots_use))]
++     }
++     require(splines)
++     X <- ns(x, intercept = TRUE, knots = knots, Boundary.knots = Boundary.knots)
++     knots <- attr(X, "knots")
++     if (is.null(Z)) {
++         if (do_excl_slope) {
++             C <- crossprod(cbind(rep(1, nrow(X)), x), X)
++             qrc <- qr(t(C))
++             Z <- qr.Q(qrc, complete = TRUE)[, (nrow(C) + 1):ncol(C)]
++         }
++         else {
++             C <- rep(1, nrow(X)) %*% X
++             qrc <- qr(t(C))
++             Z <- qr.Q(qrc, complete = TRUE)[, (nrow(C) + 1):ncol(C)]
++         }
++     }
++     structure(X %*% Z, lb = lb, ub = ub, knots = knots, Boundary.knots = Boundary.knots, 
++         do_excl_slope = do_excl_slope, do_center = do_center, 
++         mu = mu, Z = Z, class = "sp_w_c")
++ }
+
+> makepredictcall.sp_w_c <- function(var, call) {
++     if (as.character(call)[1] != "sp_w_c") 
++         return(call)
++     at <- attributes(var)[c("lb", "ub", "knots", "Boundary.knots", 
++         "Z", "do_excl_slope", "do_center", "mu")]
++     xxx <- call[1:2]
++     xxx[names(at)] <- at
++     xxx
++ }
+
+> local({
++     set.seed(48350025)
++     df <- data.frame(y = rnorm(100), x = rnorm(100, 1, sd = 2))
++     f <- lm(y ~ wz(x, do_center = FALSE) + sp_w_c(x, 4), df)
++     mm <- model.matrix(f)
++     stopifnot(ncol(mm) == 5, sum(attr(mm, "assign") == 2) == 
++         3, predict(f, newdata = df)[1:10] == predict(f, newdata = df[1:10, 
++         ]))
++     tt <- attr(f$terms, "predvars")[[4]]
++     f2 <- lm(y ~ ns(wz(x, do_center = FALSE), knots = tt$knots, 
++         Boundary.knots = tt$Boundary.knots), df)
++     stopifnot(isTRUE(all.equal(predict(f), predict(f2))))
++     f3 <- lm(y ~ sp_w_c(x, 4, do_excl_slope = FALSE), df)
++     stopifnot(isTRUE(all.equal(predict(f), predict(f3))), sum(attr(model.matrix(f3), 
++         "assign") == 1) == 4)
++     f4 <- lm(y ~ wz(x) + sp_w_c(x, 4, do_center = TRUE), df)
++     stopifnot(isTRUE(all.equal(predict(f), predict(f4))))
++ })
+Loading required package: splines
+
+> plot_sp_w_c <- function(fit, term, ylab = "Linear predictor term") {
++     tt <- terms(fit)
++     w_tr <- which(grepl(paste0("^sp_w_c\\(", term), attr(tt, 
++         "term.labels")))
++     stopifnot(length(w_tr) == 1)
++     m_tr <- which(grepl(paste0("^wz\\(", term), attr(tt, "term.labels")) & 
++         attr(tt, "order") == 1)
++     stopifnot(length(m_tr) <= 1)
++     x <- eval(parse(text = term), fit$data)
++     df <- list()
++     df[[term]] <- seq(quantile(x, 0.01), quantile(x, 0.99), length.out = 1000)
++     k <- c(m_tr, w_tr)
++     tt <- terms(fit)
++     n_terms <- length(attr(tt, "term.labels"))
++     tt <- drop.terms(tt, setdiff(1:n_terms, k))
++     attr(tt, "intercept") <- 0
++     M <- model.matrix(tt, df)
++     cl <- colnames(M)
++     co <- coef(fit)[cl]
++     cv <- vcov(fit)[cl, cl]
++     se <- sqrt(diag(M %*% tcrossprod(cv, M)))
++     y <- drop(M %*% co)
++     lb <- y - 1.96 * se
++     ub <- y + 1.96 * se
++     function() {
++         plot(y ~ df[[1]], type = "l", xlab = get_label(term), 
++             ylab = ylab, ylim = range(lb, ub))
++         lines(df[[1]], lb, lty = 2)
++         lines(df[[1]], ub, lty = 2)
++         add_hist(wz(x, do_center = FALSE), breaks = 50)
++     }
++ }
+
+> palette(c("#000000", "#E69F00", "#56B4E9", "#009E73", 
++     "#F0E442", "#0072B2", "#D55E00", "#CC79A7"))
+
+> get_plot_device <- function(expr, file_name_wo_extension, 
++     onefile = TRUE, set_par = TRUE) {
++     if (!onefile) 
++         file_name_wo_extension <- paste0(file_name_wo_extension, 
++             "_%03d")
++     pdf. <- file.path("markdown", "fig", paste0(file_name_wo_extension, 
++         ".pdf"))
++     pdf_half <- file.path("markdown", "fig", paste0(file_name_wo_extension, 
++         "-half.pdf"))
++     jpeg. <- file.path("markdown", "fig", paste0(file_name_wo_extension, 
++         ".jpg"))
++     if (set_par) {
++         par_old <- par(no.readonly = TRUE)
++         on.exit(par(par_old))
++         expr <- bquote({
++             par(mar = c(5, 4, 1, 1))
++             .(substitute(expr))
++         })
++     }
++     else expr <- substitute(expr)
++     eval(expr, parent.frame())
++     jpeg(file = jpeg., width = 1900, height = 1200, res = 300)
++     on.exit(dev.off())
++     eval(expr, parent.frame())
++     dev.off()
++     pdf(file = pdf., width = 6, height = 3.75, onefile = onefile)
++     eval(expr, parent.frame())
++     dev.off()
++     pdf(file = pdf_half, width = 4, height = 3.75, onefile = onefile)
++     eval(expr, parent.frame())
++     invisible()
++ }
+
+> get_label <- function(x) {
++     x <- as.character(x)
++     if (grepl(":", x)) {
++         z <- strsplit(x, ":")
++         return(paste0(sapply(z[[1]], get_label), collapse = " * "))
++     }
++     if (grepl("\\*", x)) {
++         z <- strsplit(x, "\\*")
++         return(paste0(sapply(z[[1]], get_label), collapse = " * "))
++     }
++     stopifnot(length(x) == 1)
++     switch(x, r_wcapq_atq = "Working capital / total assets", 
++         r_req_atq = "Retained Earnings / total assets", r_oiadpq_atq = "Operating income / total assets", 
++         r_saleq_atq = "Sales / total assets", r_niq_atq = "Net income / total assets", 
++         r_ltq_atq = "Total liabilities / total assets", r_mv_ltq = "Market value / total liabilities", 
++         r_mv_ltq_log = "log(Market value / total liabilities)", 
++         r_mv_atq = "Market value / total assets", r_wcapq_nn = "Working capital / size", 
++         r_req_nn = "Retained Earnings / size", r_oiadpq_nn = "Operating income / size", 
++         r_saleq_nn = "Sales / size", r_niq_nn = "Net income / size", 
++         r_ltq_nn = "Total liabilities / size", r_actq_lctq = "Current ratio", 
++         dtd = "Distance-to-default", sigma = "Idiosyncratic volatility", 
++         excess_ret = "Log excess return", log_market_ret = "Log market return", 
++         r1y = "T-bill rate", rel_size = "Relative log market size", 
++         stop("Not implemented for ", sQuote(x)))
++ }
+
+> residuals. <- function(object, type = "pearson", ...) {
++     if (type != "martingale") {
++         cl <- match.call()
++         cl[[1]] <- quote(stats::residuals)
++         return(eval(cl, parent.frame()))
++     }
++     stopifnot(inherits(object, "glm"), object$family$family == 
++         "poisson", object$family$link == "log", all(object$y %in% 
++         0:1))
++     offs <- object$offset
++     etas <- object$linear.predictors - offs
++     ys <- object$y
++     ys - exp(etas + offs)
++ }
+
+> add_hist <- function(x, breaks = 100) {
++     h <- hist(x, plot = FALSE, breaks = breaks)
++     nB <- length(h$breaks)
++     y <- h$counts
++     y_min <- par("usr")[3]
++     y_max <- par("usr")[4]
++     y_max <- y_max - 0.04 * (y_max - y_min)
++     y <- (y - 0)/(max(y) - 0) * (y_max - y_min) + y_min
++     rect(h$breaks[-nB], y_min, h$breaks[-1], y, border = par("fg"), 
++         angle = 45, col = rgb(0, 0, 0, 0.1))
++ }
+
+> pear_vs_res <- function(fit, bw = 2, ylim = c(-0.05, 
++     0.05), type = "pearson") {
++     require(KernSmooth)
++     if (any(weights(fit) != 1)) 
++         warning("Some weights are not one. Plot may be missleading")
++     res <- residuals.(fit, type = type)
++     eta <- predict(fit, type = "link")
++     rg <- range(eta)
++     rg <- c(rg[1] - 1e-04 * diff(rg), rg[2] + 1e-04 * diff(rg))
++     ks <- locpoly(eta, res, bandwidth = bw, range.x = rg)
++     par_old <- par(no.readonly = TRUE)
++     on.exit(par(par_old))
++     par(mar = c(5, 4, 2, 2))
++     plot(ks, type = "l", xlab = expression(eta), ylab = type, 
++         ylim = ylim)
++     abline(h = 0, lty = 2)
++     add_hist(eta)
++ }
+
+> resid_vs_covar <- function(fit, expr, bw = 1, ylim = NULL, 
++     keep = NULL, alter_par = TRUE, xlab_extra = NULL, silent = FALSE, 
++     type = "pearson") {
++     require(KernSmooth)
++     if (any(weights(fit) != 1)) 
++         warning("Some weights are not one. Plot may be missleading")
++     res <- residuals.(fit, type = type)
++     if (is.matrix(res) && type == "partial") {
++         sexpr <- deparse(substitute(expr))
++         if (!sexpr %in% colnames(res)) {
++             res <- with(fit, (y - family$linkinv(linear.predictors))/family$mu.eta(linear.predictors))
++             xvar <- eval(substitute(expr), fit$data)
++             xtrm <- rep(0, length(xvar))
++         }
++         else {
++             res <- res[, sexpr]
++             xvar <- model.matrix(terms(fit), fit$data)[, sexpr]
++             xtrm <- coef(fit)[sexpr] * xvar
++         }
++     }
++     qs <- quantile(res, c(0.001, 0.999))
++     resids <- pmin(pmax(res, qs[1]), qs[2])
++     if (!silent) {
++         cat("Residuals quantiles\n")
++         print(qs)
++     }
++     tr <- eval(substitute(expr), fit$data)
++     if (!is.null(keep)) {
++         res <- res[keep]
++         tr <- tr[keep]
++     }
++     if (missing(bw)) 
++         bw <- signif(0.2 * unname(diff(quantile(tr, c(0.05, 0.95)))), 
++             3)
++     rg <- range(tr)
++     rg <- c(rg[1] - 1e-04 * diff(rg), rg[2] + 1e-04 * diff(rg))
++     ks <- locpoly(tr, res, bandwidth = bw, range.x = rg)
++     if (is.null(ylim)) 
++         ylim <- if (type != "partial") 
++             range(ks$y)
++         else range(xtrm, ks$y)
++     if (alter_par) {
++         par_old <- par(no.readonly = TRUE)
++         on.exit(par(par_old))
++         par(mar = c(5, 4, 2, 2))
++     }
++     xlab <- paste0(deparse(substitute(expr)), collapse = " ")
++     if (!is.null(xlab_extra)) 
++         xlab <- paste(xlab, xlab_extra)
++     plot(ks, type = "l", xlab = xlab, ylab = type, ylim = ylim)
++     if (type != "partial") {
++         abline(h = 0, lty = 2)
++     }
++     else {
++         oid <- order(xvar)
++         lines(xvar[oid], xtrm[oid], lty = 2)
++     }
++     add_hist(tr)
++     legend("topright", bty = "n", legend = paste0("bw is ", bw), 
++         cex = par()$cex * 0.8)
++     rug(tr[fit$y == 1], col = "DarkBlue")
++ }
+
+> resid_vs_covar_inter <- function(fit, by, expr, bw = 1, 
++     ylim = NULL, n_grp = 4, type = "pearson") {
++     cl <- match.call()
++     by_org <- substitute(by)
++     by <- eval(substitute(by), fit$data)
++     if (is.numeric(by)) {
++         brs <- seq(min(by), max(by), length.out = n_grp + 2)
++         brs <- cbind(brs[seq_len(n_grp)], brs[seq_len(n_grp) + 
++             2] + 1e-04)
++         grps <- matrix(NA, length(by), nrow(brs))
++         for (i in 1:nrow(brs)) grps[, i] <- brs[i, 1] <= by & 
++             by < brs[i, 2]
++         colnames(grps) <- paste0("[", sprintf("%.3f", brs[, 1]), 
++             ",", sprintf("%.3f", brs[, 2]), ")")
++     }
++     else if (is.factor(by) || is.logical(by)) {
++         grps <- model.matrix(~by - 1)
++         grps <- apply(grps, 2, `>`, y = 0)
++     }
++     else stop("not implemented")
++     cat("Groups are given below with number of observations for", 
++         sQuote(deparse(cl$by)), "\n")
++     print(colSums(grps))
++     cl[[1]] <- quote(resid_vs_covar)
++     cl <- cl[!names(cl) %in% c("n_grp", "by")]
++     cl$alter_par <- FALSE
++     cl$type <- type
++     par_old <- par(no.readonly = TRUE)
++     on.exit(par(par_old))
++     if (ncol(grps) <= 2) {
++         par(mfcol = c(1, 2))
++     }
++     else if (ncol(grps) <= 4) {
++         par(mfcol = c(2, 2))
++     }
++     else if (ncol(grps) <= 6) {
++         par(mfcol = c(2, 3))
++     }
++     else par(mfcol = c(3, 3))
++     par(mar = c(5.5, 4.5, 0, 0))
++     x <- eval(substitute(expr), fit$data)
++     if (missing(bw)) 
++         bw <- signif(0.2 * unname(diff(quantile(x, c(0.05, 0.95)))), 
++             3)
++     cl$bw <- bw
++     cl$silent = TRUE
++     for (i in 1:ncol(grps)) {
++         cl$keep <- quote(grps[, i])
++         cl$xlab_extra <- paste0("\n", deparse(match.call()$by), 
++             " ", colnames(grps)[i])
++         try(eval(cl))
++         if (inherits(try, "try-error")) 
++             plot.new()
++         else {
++             rug_keep <- which(grps[, i] & fit$y == 1)
++             rug(x[rug_keep], col = "DarkBlue")
++         }
++     }
++     if (is.factor(by) || is.logical(by)) 
++         return(invisible())
++     res <- residuals.(fit, type = type)
++     if (is.matrix(res) && type == "partial") {
++         res <- with(fit, (y - family$linkinv(linear.predictors))/family$mu.eta(linear.predictors))
++         trs <- predict(fit, type = "terms")
++         trs <- trs[, match(c(deparse(by_org), deparse(substitute(expr))), 
++             colnames(trs), 0), drop = FALSE]
++         res <- res + rowSums(trs)
++     }
++     qs <- quantile(res, c(0.001, 0.999))
++     resids <- pmin(pmax(res, qs[1]), qs[2])
++     v1 <- all.vars(substitute(expr))
++     v2 <- all.vars(by_org)
++     stopifnot(length(v1) == 1, length(v2) == 1)
++     assign(v1, eval(substitute(expr), fit$data))
++     assign(v2, eval(by_org, fit$data))
++     library(mgcv)
++     bam_fit <- eval(substitute(bam(resids ~ te(v1, v2, k = c(10, 
++         10), bs = "cr"), family = gaussian()), list(v1 = as.name(v1), 
++         v2 = as.name(v2))))
++     print(summary(bam_fit))
++     par(mar = c(5, 4, 0.5, 0.5), mfcol = c(2, 2))
++     for (x in 0:3) vis.gam(bam_fit, se = -1, theta = -35 + 90 * 
++         x, ticktype = "detailed")
++ }
+
+> .nber_dates <- data.frame(start = as.Date(c("1980-01-01", 
++     "1981-07-01", "1990-07-01", "2001-03-01", "2007-12-01")), 
++     stop = as.Date(c("1980-07-29", "1982-11-29", "1991-03-29", 
++         "2001-11-29", "2009-06-29")))
+
+> library(lubridate)
+
+Attaching package: ‘lubridate’
+
+The following object is masked from ‘package:base’:
+
+    date
+
+
+> .nber_dates <- within(.nber_dates, {
++     start_y <- year(start) + (month(start) - 1)/12 + (day(start) - 
++         1)/365
++     stop_y <- year(stop) + (month(stop) - 1)/12 + (day(stop) - 
++         1)/365
++ })
+
+> nber_poly <- function(is_dates = FALSE, very_ligth_gray = FALSE) {
++     if (is_dates) {
++         ysa <- .nber_dates$start
++         yso <- .nber_dates$stop
++     }
++     else {
++         ysa <- .nber_dates$start_y
++         yso <- .nber_dates$stop_y
++     }
++     ylim <- par("usr")[3:4]
++     for (i in 1:nrow(.nber_dates)) rect(ysa[i], ylim[1], yso[i], 
++         ylim[2], col = rgb(0, 0, 0, if (very_ligth_gray) 
++             0.05
++         else 0.1), border = NA)
++     invisible(list(ylim, par("usr"), .nber_dates))
++ }
+             r_wcapq_atq  r_req_atq r_oiadpq_atq   r_mv_ltq r_saleq_atq
+r_req_atq                                                              
+r_oiadpq_atq                                                           
+r_mv_ltq                                                               
+r_saleq_atq                                                            
+r_niq_atq                              0.5281014                       
+r_ltq_atq     -0.3363036 -0.4895083              -0.3564962            
+r_actq_lctq    0.6796366                                               
+sigma                    -0.3450480                                    
+excess_ret                                                             
+rel_size                                                               
+dtd                                    0.3149849  0.4315697            
+             r_niq_atq  r_ltq_atq r_actq_lctq      sigma excess_ret  rel_size
+r_req_atq                                                                    
+r_oiadpq_atq                                                                 
+r_mv_ltq                                                                     
+r_saleq_atq                                                                  
+r_niq_atq                                                                    
+r_ltq_atq                                                                    
+r_actq_lctq                                                                  
+sigma                                                                        
+excess_ret                                    -0.3084516                     
+rel_size                                      -0.5424527                     
+dtd                    -0.3457952             -0.5430479  0.3547971 0.5717129
+             dtd
+r_req_atq       
+r_oiadpq_atq    
+r_mv_ltq        
+r_saleq_atq     
+r_niq_atq       
+r_ltq_atq       
+r_actq_lctq     
+sigma           
+excess_ret      
+rel_size        
+dtd             
+
+
+Winsorized
+             r_wcapq_atq  r_req_atq r_oiadpq_atq   r_mv_ltq r_saleq_atq
+r_req_atq                                                              
+r_oiadpq_atq                                                           
+r_mv_ltq                                                               
+r_saleq_atq                                                            
+r_niq_atq                              0.3037239                       
+r_ltq_atq     -0.4859341 -0.6077510   -0.3302458 -0.5206526            
+r_actq_lctq    0.5026356                                               
+sigma                    -0.4791813   -0.4905568                       
+excess_ret                                                             
+rel_size                                                               
+dtd                                                                    
+              r_niq_atq r_ltq_atq r_actq_lctq      sigma excess_ret  rel_size
+r_req_atq                                                                    
+r_oiadpq_atq                                                                 
+r_mv_ltq                                                                     
+r_saleq_atq                                                                  
+r_niq_atq                                                                    
+r_ltq_atq    -0.3707325                                                      
+r_actq_lctq                                                                  
+sigma        -0.4338508  0.351972                                            
+excess_ret                                                                   
+rel_size                                      -0.4550462                     
+dtd                                           -0.4555759            0.4180162
+             dtd
+r_req_atq       
+r_oiadpq_atq    
+r_mv_ltq        
+r_saleq_atq     
+r_niq_atq       
+r_ltq_atq       
+r_actq_lctq     
+sigma           
+excess_ret      
+rel_size        
+dtd             
+               PC1   PC2   PC3   PC4   PC5   PC6   PC7   PC8   PC9  PC10  PC11
+rel_size     -0.35 -0.26  0.25  0.07 -0.08 -0.37 -0.46  0.38  0.46 -0.17 -0.04
+excess_ret   -0.24 -0.15 -0.18  0.62 -0.55 -0.04  0.45  0.09 -0.02 -0.02 -0.01
+sigma         0.34  0.28 -0.17  0.10  0.39 -0.20  0.42  0.53  0.33 -0.11 -0.02
+r_actq_lctq  -0.13  0.60  0.03  0.18 -0.10  0.22 -0.25  0.09 -0.03  0.00 -0.68
+r_ltq_atq     0.35 -0.24 -0.36  0.19 -0.04  0.06 -0.43  0.43 -0.30  0.43  0.01
+r_niq_atq    -0.38 -0.13 -0.31  0.03  0.30  0.42  0.05 -0.11  0.50  0.46  0.00
+r_saleq_atq  -0.08  0.07 -0.63 -0.46 -0.27 -0.48  0.02 -0.15  0.08  0.04 -0.22
+r_mv_ltq     -0.34  0.18  0.10  0.28  0.42 -0.55  0.02 -0.14 -0.34  0.37  0.05
+r_oiadpq_atq -0.36 -0.14 -0.42  0.05  0.36  0.18 -0.09  0.12 -0.34 -0.60  0.01
+r_req_atq    -0.37 -0.01  0.22 -0.50 -0.12  0.14  0.32  0.54 -0.29  0.23 -0.02
+r_wcapq_atq  -0.16  0.58 -0.15  0.01 -0.22  0.08 -0.23  0.10  0.06 -0.01  0.70
+Loading required package: nlme
+This is mgcv 1.8-24. For overview type 'help("mgcv-package")'.
+                          mean       median standard deviation 1% quantile.1%
+wz(dtd)          -6.751815e-07 -0.539633290         4.14423418    -7.46494918
+wz(excess_ret)    1.523872e-07  0.037291696         0.39988336    -1.45883966
+wz(r_wcapq_atq)   2.866911e-08 -0.023797368         0.16352372    -0.32071205
+wz(r_oiadpq_atq)  6.776253e-18 -0.003069024         0.08787263    -0.30960825
+wz(r_mv_ltq)     -3.649407e-07 -0.622175509         1.92708620    -1.64459810
+wz(r_niq_atq)    -2.997445e-08  0.010203933         0.10287988    -0.55483834
+wz(r_ltq_atq)    -3.946774e-17 -0.015501304         0.18886662    -0.39357044
+wz(r_actq_lctq)  -5.066526e-17 -0.234565506         1.04172047    -1.41512634
+wz(sigma)        -1.158918e-08 -0.003545951         0.01319539    -0.01595945
+wz(rel_size)     -2.175699e-07  0.036880853         1.79224821    -4.49996095
+                 99% quantile.99%
+wz(dtd)               12.92172307
+wz(excess_ret)         1.02125791
+wz(r_wcapq_atq)        0.45355030
+wz(r_oiadpq_atq)       0.27239444
+wz(r_mv_ltq)          10.02861198
+wz(r_niq_atq)          0.24578781
+wz(r_ltq_atq)          0.72674842
+wz(r_actq_lctq)        4.59565746
+wz(sigma)              0.05492898
+wz(rel_size)           4.09259425
+\begin{tabular}{lrrrrr}
+ \toprule & Mean & Median & Standard deviation & 1\% & 99\% \\
+\midrule
+Distance-to-default & -0.000 & -0.540 & 4.144 & -7.465 & 12.922 \\
+Log excess return & 0.000 & 0.037 & 0.400 & -1.459 & 1.021 \\
+Working capital / total assets & 0.000 & -0.024 & 0.164 & -0.321 & 0.454 \\
+Operating income / total assets & 0.000 & -0.003 & 0.088 & -0.310 & 0.272 \\
+Market value / total liabilities & -0.000 & -0.622 & 1.927 & -1.645 & 10.029 \\
+Net income / total assets & -0.000 & 0.010 & 0.103 & -0.555 & 0.246 \\
+Total liabilities / total assets & -0.000 & -0.016 & 0.189 & -0.394 & 0.727 \\
+Current ratio & -0.000 & -0.235 & 1.042 & -1.415 & 4.596 \\
+Idiosyncratic volatility & -0.000 & -0.004 & 0.013 & -0.016 & 0.055 \\
+Relative log market size & -0.000 & 0.037 & 1.792 & -4.500 & 4.093 \\
+\bottomrule
+\end{tabular}> 
+> #####
+> # formulas that we use later
+> f0 <- y ~ wz(r_wcapq_atq) + wz(r_oiadpq_atq) + wz(r_mv_ltq) + 
++   wz(r_niq_atq) + wz(r_ltq_atq) + wz(r_actq_lctq) + wz(sigma) + 
++   wz(excess_ret) + wz(rel_size) + wz(dtd) + log_market_ret + r1y
+> 
+> i0 <- update(
++   f0, . ~ . + sp_w_c(r_niq_atq, 3) + sp_w_c(sigma, 3) - wz(r_mv_ltq) + 
++     + wz(r_mv_ltq_log) + sp_w_c(r_mv_ltq_log, 3) + wz(r_actq_lctq):wz(sigma))
+> 
+> #####
+> # glmnet
+> library(glmnet)
+Loading required package: Matrix
+Loading required package: foreach
+Loaded glmnet 2.0-16
+
+> func <- function(frm, data, do_cv, lambda = NULL, family = "binomial"){
++   mf <- model.frame(frm, data)
++   X <- model.matrix(terms(mf), mf)
++   X <- X[, colnames(X) != "(Intercept)"]
++   y <- model.response(mf)
++   if(do_cv)
++    return(cv.glmnet(X, y, type.measure = "deviance", nfolds = 10, alpha = 0, 
++                     family = family))
++   
++   glmnet(X, y, alpha = 0, lambda = lambda, family = family)
++ }
+> 
+> set.seed(24203767)
+> g1 <- func(i0, dat, do_cv = TRUE)
+> saveRDS_ask(g1, file.path("markdown", "cache", "glmnet-cv.RDS"))
+Saving...
+> plot(g1)
+> 
+> g2 <- func(i0, dat, do_cv = FALSE)
+> dim(coef(g2))
+[1]  20 100
+> min(log(g2$lambda))
+[1] -7.738191
+> glm_fit <- glm(i0, binomial(), dat)
+> cbind(coef(g2)[, 95:100], i0 = coef(glm_fit))
+20 x 7 sparse Matrix of class "dgCMatrix"
+                                  s94         s95         s96         s97
+(Intercept)               -8.65533066 -8.70641265 -8.75685103 -8.80509942
+wz(r_wcapq_atq)           -0.78567518 -0.81065454 -0.83513900 -0.85905036
+wz(r_oiadpq_atq)          -1.42752608 -1.42250828 -1.41643473 -1.41142919
+wz(r_niq_atq)             -1.99278353 -2.00635104 -2.01757093 -2.02979742
+wz(r_ltq_atq)              0.72679269  0.72041841  0.71293147  0.70533071
+wz(r_actq_lctq)           -0.11968276 -0.12699162 -0.13472491 -0.14286876
+wz(sigma)                 25.78083031 26.29919433 26.83726662 27.38719812
+wz(excess_ret)            -1.37157783 -1.39126355 -1.41019025 -1.42784611
+wz(rel_size)              -0.15654950 -0.15882543 -0.16112326 -0.16315905
+wz(dtd)                   -0.03808784 -0.03792195 -0.03775128 -0.03740315
+log_market_ret             0.55965000  0.57936473  0.59818160  0.61612468
+r1y                        2.16839295  2.26472903  2.35997743  2.45404606
+sp_w_c(r_niq_atq, 3)1     -0.01795609 -0.02908715 -0.03845796 -0.04865575
+sp_w_c(r_niq_atq, 3)2      0.90802729  0.90785537  0.90741517  0.90574324
+sp_w_c(sigma, 3)1          0.55288488  0.53102024  0.50725798  0.48100243
+sp_w_c(sigma, 3)2         -0.36293059 -0.38935889 -0.41453459 -0.43782025
+wz(r_mv_ltq_log)          -0.25423145 -0.26058302 -0.26706095 -0.27371379
+sp_w_c(r_mv_ltq_log, 3)1   0.93583380  0.93691809  0.93646825  0.93533207
+sp_w_c(r_mv_ltq_log, 3)2   1.25594713  1.29524824  1.33342564  1.37073365
+wz(r_actq_lctq):wz(sigma) -0.55224681 -0.25482576  0.04792425  0.35567069
+                                  s98         s99          i0
+(Intercept)               -8.85215593 -8.89794447 -10.3546721
+wz(r_wcapq_atq)           -0.88220939 -0.90439717  -0.5999115
+wz(r_oiadpq_atq)          -1.40599679 -1.40045571  -1.2505885
+wz(r_niq_atq)             -2.04173376 -2.05280839  -2.1139815
+wz(r_ltq_atq)              0.69739025  0.68898392   0.3241729
+wz(r_actq_lctq)           -0.15152962 -0.16066248  -0.7924406
+wz(sigma)                 27.97433321 28.58762203 105.2929556
+wz(excess_ret)            -1.44467657 -1.46061980  -1.8138563
+wz(rel_size)              -0.16509977 -0.16694433  -0.1620487
+wz(dtd)                   -0.03694191 -0.03638746   0.1586383
+log_market_ret             0.63319339  0.64936428   0.8824511
+r1y                        2.54638967  2.63671424   3.9134865
+sp_w_c(r_niq_atq, 3)1     -0.05873905 -0.06819752  -0.1528047
+sp_w_c(r_niq_atq, 3)2      0.90322343  0.90021535   0.6830414
+sp_w_c(sigma, 3)1          0.45163355  0.41980326  -4.1874313
+sp_w_c(sigma, 3)2         -0.46009403 -0.48120675  -1.5493763
+wz(r_mv_ltq_log)          -0.28041668 -0.28724855  -0.9140134
+sp_w_c(r_mv_ltq_log, 3)1   0.93293593  0.92913878  -1.7357533
+sp_w_c(r_mv_ltq_log, 3)2   1.40633000  1.44038882   0.5698858
+wz(r_actq_lctq):wz(sigma)  0.67098319  0.99144636  14.7372164
+> 
+> 
+> #####
+> # boosted trees
+> library(xgboost)
+> X <- model.matrix(f0, dat)
+> X <- X[, colnames(X) != "(Intercept)"]
+> y <- model.response(model.frame(f0, dat))
+> xg_dat <- xgb.DMatrix(data = X, label = y)
+> 
+> set.seed(24203767)
+> depths <- 4:1
+> names(depths) <- 4:1
+> eta_use <- .02
+> xgb_cv_out <- lapply(depths, function(depth){
++   cb_func <- function (period = 100L) {
++     callback <- function(env = parent.frame()) {
++       if (length(env$bst_evaluation) == 0 || period == 0)
++         return()
++       i <- env$iteration
++       if ((i - 1)%%period == 0 || i == env$begin_iteration || i == env$end_iteration)
++         cat(sprintf(
++           "depth: %1d it: %4d train: %7.5f test: %7.5f\n", 
++           depth, i, env$bst_evaluation[1], env$bst_evaluation[2]))
++     }
++     attr(callback, 'call') <- match.call()
++     attr(callback, 'name') <- 'cb-func'
++     callback
++   }
++   xgb.cv(
++     params = list(objective = "binary:logistic", max_depth = depth, 
++                   eta = eta_use, nthread = 6L), 
++     xg_dat, nfold = 5L, metrics = "logloss", nrounds = 5000L, verbose = F,
++     callbacks = list(cb_func()), early_stopping_rounds = 100L)
++ })
+depth: 4 it:    1 train: 0.67379 test: 0.67344
+depth: 4 it:  101 train: 0.07284 test: 0.07307
+depth: 4 it:  201 train: 0.01495 test: 0.01542
+depth: 4 it:  301 train: 0.00743 test: 0.00824
+depth: 4 it:  401 train: 0.00628 test: 0.00735
+depth: 4 it:  501 train: 0.00595 test: 0.00725
+depth: 4 it:  601 train: 0.00571 test: 0.00725
+depth: 3 it:    1 train: 0.67379 test: 0.67344
+depth: 3 it:  101 train: 0.07298 test: 0.07309
+depth: 3 it:  201 train: 0.01524 test: 0.01549
+depth: 3 it:  301 train: 0.00787 test: 0.00829
+depth: 3 it:  401 train: 0.00679 test: 0.00738
+depth: 3 it:  501 train: 0.00653 test: 0.00725
+depth: 3 it:  601 train: 0.00635 test: 0.00722
+depth: 3 it:  701 train: 0.00619 test: 0.00723
+depth: 2 it:    1 train: 0.67379 test: 0.67344
+depth: 2 it:  101 train: 0.07311 test: 0.07316
+depth: 2 it:  201 train: 0.01550 test: 0.01563
+depth: 2 it:  301 train: 0.00821 test: 0.00843
+depth: 2 it:  401 train: 0.00714 test: 0.00746
+depth: 2 it:  501 train: 0.00691 test: 0.00730
+depth: 2 it:  601 train: 0.00678 test: 0.00725
+depth: 2 it:  701 train: 0.00669 test: 0.00723
+depth: 2 it:  801 train: 0.00661 test: 0.00722
+depth: 2 it:  901 train: 0.00653 test: 0.00721
+depth: 2 it: 1001 train: 0.00647 test: 0.00720
+depth: 2 it: 1101 train: 0.00640 test: 0.00720
+depth: 1 it:    1 train: 0.67379 test: 0.67344
+depth: 1 it:  101 train: 0.07329 test: 0.07332
+depth: 1 it:  201 train: 0.01595 test: 0.01600
+depth: 1 it:  301 train: 0.00866 test: 0.00874
+depth: 1 it:  401 train: 0.00751 test: 0.00765
+depth: 1 it:  501 train: 0.00722 test: 0.00742
+depth: 1 it:  601 train: 0.00710 test: 0.00733
+depth: 1 it:  701 train: 0.00704 test: 0.00729
+depth: 1 it:  801 train: 0.00699 test: 0.00727
+depth: 1 it:  901 train: 0.00696 test: 0.00725
+depth: 1 it: 1001 train: 0.00693 test: 0.00724
+depth: 1 it: 1101 train: 0.00691 test: 0.00723
+depth: 1 it: 1201 train: 0.00689 test: 0.00723
+depth: 1 it: 1301 train: 0.00688 test: 0.00723
+depth: 1 it: 1401 train: 0.00686 test: 0.00723
+depth: 1 it: 1501 train: 0.00685 test: 0.00723
+> saveRDS_ask(xgb_cv_out, file.path("markdown", "cache", "xgb-cv.RDS"))
+Saving...
+> 
+> logs <- lapply(xgb_cv_out, "[[", "evaluation_log")
+> logs <- lapply(logs, "[[", "test_logloss_mean")
+> # get deviance insetad
+> logs <- lapply(logs, '*', 2)
+> 
+> # cut away the first indices
+> start_at <- 300L
+> max_length <- max(sapply(logs, length))
+> stopifnot(all(max_length > start_at), start_at >= 2L)
+> logs <- lapply(logs, function(x) x[-(1:(start_at - 1L))])
+> 
+> # plot
+> par(mar = c(5, 4, .5, .5))
+> plot(1, type = "n", xlim = c(start_at, max_length), ylim = 
++      range(logs), ylab = "deviance")
+> for(i in 1:4)
++   lines(seq_along(logs[[i]]) - 1L + start_at, logs[[i]], lty = i)
+> 
+> legend("topright", legend = names(logs), lty = seq_along(logs), bty = "n")
+> 
+> # minimum and standard deviations
+> sapply(logs, min)
+        4         3         2         1 
+0.0144780 0.0144476 0.0144020 0.0144528 
+> sapply(logs, which.min) + start_at - 1L
+   4    3    2    1 
+ 556  610 1064 1459 
+> local({
++   lgs <- lapply(xgb_cv_out, function(x) x$evaluation_log)  
++   mins <- sapply(lgs, function(x) which.min(x$test_logloss_mean))
++   mapply(`[`, lapply(lgs, `[[`, "test_logloss_std"), mins)
++ })
+           4            3            2            1 
+0.0005607620 0.0004708432 0.0006844656 0.0005576887 
+> 
+> # boost stumps
+> xgb_fit <- xgb.train(
++   params = list(objective = "binary:logistic", max_depth = 1L, 
++                 eta = eta_use, nthread = 6L),
++   data = xg_dat, nrounds = 1500L)
+> (imp <- xgb.importance(model = xgb_fit))
+             Feature        Gain       Cover  Frequency
+ 1:   wz(excess_ret) 0.408284432 0.878808267 0.21400000
+ 2:        wz(sigma) 0.161395214 0.033585938 0.12333333
+ 3:     wz(r_mv_ltq) 0.157547992 0.022683907 0.16000000
+ 4:    wz(r_niq_atq) 0.078570333 0.007181498 0.05266667
+ 5:          wz(dtd) 0.075740688 0.013021362 0.09733333
+ 6:     wz(rel_size) 0.059433844 0.012524504 0.05200000
+ 7:    wz(r_ltq_atq) 0.019174707 0.006596432 0.06066667
+ 8:  wz(r_actq_lctq) 0.011197836 0.005287869 0.04933333
+ 9:  wz(r_wcapq_atq) 0.009100763 0.003312596 0.03066667
+10:   log_market_ret 0.008832981 0.007159553 0.06733333
+11: wz(r_oiadpq_atq) 0.006882024 0.004617367 0.04333333
+12:              r1y 0.003839184 0.005220706 0.04933333
+> 
+> # look at partial effects
+> local({
++   set.seed(32997487)
++   Xt <- X[sample.int(nrow(X), min(nrow(X), 10000L)), ]
++   plot_info <- lapply(colnames(X), function(s){
++     z <- X[, s]
++     z_grid <- seq(min(z), max(z), length.out = 201)
++     y_hat <- sapply(z_grid, function(x){
++       Xt[, s] <- x
++       y_hat <- predict(xgb_fit, newdata = Xt, outputmargin = TRUE)
++       mean(y_hat)
++     })
++     y_hat <- y_hat - mean(y_hat)
++     
++     list(y_hat = y_hat, z_grid = z_grid)
++   })
++   names(plot_info) <- colnames(X)
++ 
++   par(mar = c(5, 4, 1, 1), mfcol = c(2, 2))
++   y_lim <- range(lapply(plot_info, "[[", "y_hat"))
++   for(i in seq_along(plot_info))
++     plot(plot_info[[i]]$z_grid, plot_info[[i]]$y_hat, ylim = y_lim,
++          type = "l", xlab = names(plot_info)[i], ylab = "log-odds")
++ })
+> 
+> # boost deepth two tree
+> xgb_fit_two <- xgb.train(
++   params = list(objective = "binary:logistic", max_depth = 2L, 
++                 eta = eta_use, nthread = 6L),
++   data = xg_dat, nrounds = 1000L)
+> (imp <- xgb.importance(model = xgb_fit_two))
+             Feature        Gain       Cover  Frequency
+ 1:   wz(excess_ret) 0.439339988 0.643801287 0.18300000
+ 2:          wz(dtd) 0.139928838 0.026382929 0.07466667
+ 3:        wz(sigma) 0.130970976 0.207302112 0.12166667
+ 4:     wz(r_mv_ltq) 0.106923017 0.013518333 0.12933333
+ 5:    wz(r_niq_atq) 0.043369745 0.007566872 0.08000000
+ 6:     wz(rel_size) 0.043322473 0.077485723 0.07800000
+ 7:    wz(r_ltq_atq) 0.022676081 0.005614453 0.06666667
+ 8:  wz(r_actq_lctq) 0.018696584 0.003369986 0.05033333
+ 9:              r1y 0.016829138 0.004021371 0.06233333
+10: wz(r_oiadpq_atq) 0.016478386 0.003287943 0.04800000
+11:   log_market_ret 0.011907571 0.005244763 0.05533333
+12:  wz(r_wcapq_atq) 0.009557204 0.002404228 0.05066667
+> 
+> library(data.table)
+
+Attaching package: ‘data.table’
+
+The following objects are masked from ‘package:lubridate’:
+
+    hour, isoweek, mday, minute, month, quarter, second, wday, week,
+    yday, year
+
+> local({
++   tree_dat <- xgb.model.dt.tree(model = xgb_fit_two)  
++   tree_dat <- tree_dat[Feature != "Leaf"]
++   func <- function(.SD){
++     root <- .SD$Feature[1]
++     lvl_2 <- .SD[2:3, ]
++     lvls_2 <- lvl_2[, Feature := ifelse(
++       Feature < root, 
++       paste0(Feature, ":", root),
++       paste0(root, ":", Feature))]
++     rbind(.SD[1, ], lvls_2)
++   }
++   tree_dat <- tree_dat[, func(.SD), by = Tree]
++   tree_dat <- tree_dat[
++     , .(Quality = sum(Quality), Frequency = .N), by = Feature]
++   tree_dat[, `:=`(Quality = Quality / sum(Quality), 
++                   Frequency = Frequency / sum(Frequency))]
++   print(head(tree_dat[order(Quality, decreasing = TRUE)], 50))
++ })
+                            Feature      Quality   Frequency
+ 1:                  wz(excess_ret) 0.4169276788 0.118000000
+ 2:                         wz(dtd) 0.1276655120 0.026666667
+ 3:                       wz(sigma) 0.1040993528 0.057333333
+ 4:     wz(excess_ret):wz(r_mv_ltq) 0.0637243503 0.060333333
+ 5:                    wz(r_mv_ltq) 0.0369281061 0.050666667
+ 6:        wz(excess_ret):wz(sigma) 0.0286196152 0.065333333
+ 7:           wz(dtd):wz(r_niq_atq) 0.0245070769 0.028000000
+ 8:     wz(excess_ret):wz(rel_size) 0.0201729664 0.031666667
+ 9:    wz(excess_ret):wz(r_ltq_atq) 0.0131810596 0.016666667
+10:  wz(excess_ret):wz(r_actq_lctq) 0.0102666770 0.017333333
+11:          wz(r_mv_ltq):wz(sigma) 0.0094104648 0.011333333
+12:          wz(rel_size):wz(sigma) 0.0088163855 0.016000000
+13:      wz(r_mv_ltq):wz(r_niq_atq) 0.0083366653 0.026666667
+14:                   r1y:wz(sigma) 0.0079954532 0.020666667
+15:          wz(dtd):wz(excess_ret) 0.0079558085 0.023666667
+16:    wz(excess_ret):wz(r_niq_atq) 0.0066455879 0.011333333
+17: wz(excess_ret):wz(r_oiadpq_atq) 0.0061521623 0.016666667
+18:                    wz(rel_size) 0.0059868932 0.006666667
+19:       wz(r_actq_lctq):wz(sigma) 0.0055142366 0.015666667
+20:     log_market_ret:wz(r_mv_ltq) 0.0049641942 0.019333333
+21:   wz(r_mv_ltq):wz(r_oiadpq_atq) 0.0042308915 0.011666667
+22:                r1y:wz(rel_size) 0.0041272839 0.012666667
+23:        wz(dtd):wz(r_oiadpq_atq) 0.0037838847 0.004000000
+24:  wz(excess_ret):wz(r_wcapq_atq) 0.0037221236 0.016666667
+25:                   wz(r_niq_atq) 0.0037029501 0.014333333
+26:         wz(r_niq_atq):wz(sigma) 0.0035089235 0.004333333
+27:            wz(dtd):wz(rel_size) 0.0034173934 0.006666667
+28:     wz(r_ltq_atq):wz(r_ltq_atq) 0.0026422967 0.012666667
+29:   wz(excess_ret):wz(excess_ret) 0.0025838354 0.014333333
+30:           wz(dtd):wz(r_ltq_atq) 0.0024776911 0.002666667
+31:   log_market_ret:wz(excess_ret) 0.0024566186 0.010000000
+32:       wz(r_wcapq_atq):wz(sigma) 0.0024407160 0.007000000
+33:   wz(r_ltq_atq):wz(r_wcapq_atq) 0.0022718453 0.005000000
+34:        log_market_ret:wz(sigma) 0.0021765600 0.008000000
+35:            r1y:wz(r_oiadpq_atq) 0.0020807068 0.007000000
+36:          log_market_ret:wz(dtd) 0.0020672219 0.005333333
+37:         wz(dtd):wz(r_actq_lctq) 0.0020072631 0.008000000
+38:                r1y:wz(r_mv_ltq) 0.0018337528 0.006666667
+39:         wz(dtd):wz(r_wcapq_atq) 0.0017171009 0.005000000
+40:    wz(r_wcapq_atq):wz(rel_size) 0.0016669435 0.006333333
+41:      wz(r_ltq_atq):wz(r_mv_ltq) 0.0015835438 0.013666667
+42:               r1y:wz(r_niq_atq) 0.0015193428 0.003333333
+43:      wz(r_oiadpq_atq):wz(sigma) 0.0014192073 0.005333333
+44:                 wz(r_wcapq_atq) 0.0013856866 0.011000000
+45:     wz(r_niq_atq):wz(r_niq_atq) 0.0013524819 0.006000000
+46:  log_market_ret:wz(r_wcapq_atq) 0.0013058778 0.006333333
+47:            wz(dtd):wz(r_mv_ltq) 0.0011689561 0.007000000
+48:               wz(dtd):wz(sigma) 0.0011545563 0.009000000
+49:   wz(r_oiadpq_atq):wz(rel_size) 0.0010001342 0.003666667
+50:       wz(r_mv_ltq):wz(rel_size) 0.0009664414 0.002333333
+                            Feature      Quality   Frequency
+> 
+> # make sure to shut down the plot device
+> dev.off()
+null device 
+          1 
+> 
+> proc.time()
+    user   system  elapsed 
+5339.619    3.773 1076.707 

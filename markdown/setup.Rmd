@@ -1,0 +1,217 @@
+<!-- the file assumes that you have defined list `fs` with the path to the
+     data -->
+
+Source script with the R functions we need 
+
+<div class="hideable">
+
+```{r source_r_funcs}
+source(file.path("R", "regres_funcs.R"), echo = TRUE, 
+       max.deparse.length = 5000)
+source(file.path("R", "get_plot_device.R"), echo = TRUE, 
+       max.deparse.length = 5000)
+source(file.path("R", "get_label.R"), echo = TRUE, 
+       max.deparse.length = 5000)
+source(file.path("R", "diagnostics.R"), echo = TRUE, 
+       max.deparse.length = 5000)
+source(file.path("R", "cycles.R"), echo = TRUE, 
+       max.deparse.length = 5000)
+
+# change default
+formals(sp_w_c)$do_center <- formals(wz)$do_center <- TRUE
+```
+
+</div>
+
+Load the data
+
+```{r load_dat}
+tmp <- readRDS(file.path("data", "final.RDS"))
+dat <- tmp$data
+make_ym <- tmp$ym_funcs$make_ym
+make_ym_inv <- tmp$ym_funcs$make_ym_inv
+
+# the branch and commit id the data set was made with 
+tmp$git_info
+rm(tmp)
+```
+
+Show some properties and prepare data
+
+<div class="hideable">
+
+```{r show_prop}
+# exclude firms before they are first rated or after they stop being rated
+(o <- with(dat, table(
+  y,
+  `before first rating date` = tstart < start_rated_ym, 
+  `after last rating date`   = tstop  > stop_rated_ym,
+  useNA = "ifany")))
+round(prop.table(o, margin = 2:3), 5)
+
+table(dat$y)
+dat <- subset(dat, !is.na(start_rated_ym) & tstart >= start_rated_ym)
+table(dat$y)
+dat <- subset(dat, tstop <= stop_rated_ym) 
+table(dat$y)
+
+# starts and ends dates
+make_ym_inv(min(dat$tstart))
+make_ym_inv(max(dat$tstop))
+
+# tstop of last event. We assume this is the most recent data from Moodys
+max_is_ev <- with(subset(dat, y == TRUE), max(tstop))
+make_ym_inv(max_is_ev)
+dat <- subset(dat, tstop <= max_is_ev)
+
+# max time between stop time and event. Most happen in the same month of the
+# observations. Thus, we may miss only a few events in the end of the sample
+table(with(subset(dat, y), distress_time - tstop))
+
+# we assume that a macro avariable is included such that each 
+# row represents one month. Otherwise we need to change in the rest of 
+# this file...
+stopifnot(all(dat$stop - dat$start == 1))
+
+#####
+# plot size of risk set and distress rate through time
+ns <- tapply(dat$y, dat$tstop, length)
+ti <- as.integer(names(ns))
+ti <- make_ym_inv(as.integer(ti + sign(ti) * 1e-2))
+
+# number of observations by date
+plot(ns ~ ti, type = "l", ylim = range(ns, 0), 
+     ylab = "Number of observations", xlab = "Time")
+
+# distress rate by date
+get_plot_device({
+  n_distress <- tapply(dat$y, dat$tstop, sum)
+  plot(n_distress / ns ~ ti, type = "h", xlab = "Time", ylab = "Distress rate")
+  lines(smooth.spline(ti, n_distress/ns), lwd = 2, col = "DarkGreen")
+}, "def_w_smooth")
+
+#####
+# remove observations with missing data
+vars <- c("r_wcapq_atq", "r_req_atq", "r_oiadpq_atq", "r_mv_ltq",
+          "r_saleq_atq", "r_niq_atq", "r_ltq_atq", "r_actq_lctq", "sigma",
+          "excess_ret", "rel_size")
+
+# check cor
+local({
+  tmp <- cor(dat[, c(vars, "dtd")], use = "pairwise.complete.obs")
+  tmp[abs(tmp) < 0.3] <- NA_real_
+  tmp[upper.tri(tmp, diag = TRUE)] <- NA_real_
+  print(tmp[-1, ], na.print = "")
+  
+  cat("\n\nWinsorized\n")
+  tmp <- cor(dat[, c(vars, "dtd")], use = "pairwise.complete.obs")
+  tmp <- apply(tmp, 2, wz)
+  tmp[abs(tmp) < 0.3] <- NA_real_
+  tmp[upper.tri(tmp, diag = TRUE)] <- NA_real_
+  print(tmp[-1, ], na.print = "")
+})
+
+# keep only complete case
+nrow(dat)
+dat <- dat[complete.cases(dat[, vars]), ]
+nrow(dat)
+
+# we will use the log scaled variable later
+dat$r_mv_ltq_log <- log(dat$r_mv_ltq)
+
+# redo-distress rate plot 
+get_plot_device({
+  tmp <- tapply(dat$y, dat$tstop, mean)
+  ti <- make_ym_inv(as.integer(names(tmp)))
+  plot(tmp ~ ti, type = "h", xlab = "Time", ylab = "Distress rate")
+  lines(smooth.spline(ti, tmp), lwd = 2, col = "DarkGreen")
+}, "def_w_smooth_redo")
+```
+
+Plot histograms of covariates
+
+```{r cov_hist}
+par(mar = c(5, 4, .5, .5), mfcol = c(2, 2))
+invisible(sapply(vars, function(n)
+  hist(wz(dat[[n]], do_scale = TRUE), xlab = n, main = "", breaks = 50)))
+
+# look at pca
+local({
+  X <- do.call(cbind, lapply(dat[vars], wz))
+  pc <- prcomp(X, scale. = TRUE)
+  print(round(pc$rotation[nrow(pc$rotation):1, ], 2))
+  
+  col <- colorRampPalette(c("DarkBlue", "White", "DarkGreen"))(256)
+  zlim <- max(abs(pc$rotation))
+  par(mar = c(4, 7, .5, .5), mfcol = c(1, 1))
+  image(t(pc$rotation), axes = FALSE, col = col, zlim = c(-zlim, zlim))
+  x <- colnames(pc$rotation)
+  axis(1, at = seq(0, 1, length.out = length(x)), labels= x, lwd = 0, las = 2)
+  y <- rownames(pc$rotation)
+  axis(2, at = seq(0, 1, length.out = length(y)), labels= y, lwd = 0, las = 1)
+  
+  par(mar = c(5, 4, .5, .5))
+  z <- pc$sdev^2 / sum(pc$sdev^2)
+  plot(z, pch = 16, ylab = "Prop var", ylim = c(0, z[1]))
+})
+```
+
+Make distress plot with GAM
+
+```{r distress_plot_gam, cache = 1}
+get_plot_device(
+  local({
+    tp <- tapply(dat$y, dat$tstop, mean)
+    ti <- make_ym_inv(as.integer(names(tp)))
+    plot(tp ~ ti, type = "h", xlab = "Time", ylab = "Default rate", yaxs = "i", 
+         ylim = c(0, max(tp) * 1.04))
+    nber_poly(is_dates = TRUE)
+    
+    tb <- xtabs(~ tstop + y, dat)
+    tb <- tb[, c("TRUE", "FALSE")]
+    ti <- as.integer(rownames(tb))
+    library(mgcv)
+    fi <- bam(tb ~ s(ti, k = 30, bs = "cr"), binomial())
+    pe <- predict(fi, type = "response")
+    lines(make_ym_inv(ti), pe, lwd = 2, col = "DarkBlue")
+  }), "def_w_smooth_redo-gam") 
+```
+
+</div>
+
+Create summary statistics table
+
+<div class="hideable">
+
+```{r sum_stats}
+local({
+  frm_vars <- 
+    ~ wz(dtd) + wz(excess_ret) + wz(r_wcapq_atq) + wz(r_oiadpq_atq) + 
+    wz(r_mv_ltq) + wz(r_niq_atq) + wz(r_ltq_atq) + wz(r_actq_lctq) + wz(sigma) + 
+    wz(rel_size) - 1
+  
+  mm <- model.matrix(frm_vars, dat)
+  vs <- all.vars(frm_vars)
+  labs <- sapply(vs, get_label)
+  
+  ss <- t(apply(mm, 2, function(x){
+    qs <- quantile(x, c(.01, .99))
+    x <- pmin(pmax(x, qs[1]), qs[2])
+    c(mean = mean(x), median = median(x), `standard deviation` = sd(x),  
+      `1% quantile` = qs[1], `99% quantile` = qs[2])
+  }))
+  print(ss) # to check the result
+  ss <- structure(sprintf("%.3f", ss), .Dim = dim(ss), .Dimnames = 
+                    dimnames(ss))
+  
+  cat("\\begin{tabular}{lrrrrr}\n",
+      "\\toprule",
+      "& Mean & Median & Standard deviation & 1\\% & 99\\%",
+      "\\\\\n\\midrule\n")
+  for(i in 1:nrow(ss))
+    cat(labs[i], "&", paste0(ss[i, ], collapse = " & "), "\\\\\n")
+  cat("\\bottomrule\n\\end{tabular}")
+})
+```
+
+</div>
