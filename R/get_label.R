@@ -20,6 +20,7 @@ get_label <- function(x){
     r_niq_atq = "Net income / total assets", 
     r_ltq_atq = "Total liabilities / total assets", 
     r_mv_ltq = "Market value / total liabilities",
+    r_mv_ltq_log = "log(Market value / total liabilities)",
     r_mv_atq = "Market value / total assets",
     
     r_wcapq_nn = "Working capital / size", 

@@ -56,10 +56,10 @@ local({
 })
 
 #####
-# function to winsorize and then make B-spline basis matrix for a 3. order
-# polynomial spline with a sum-to-zero constraint and which is orthogonal to 
-# 1. order term. The latter is to make it easy to test the significance w/
-# `drop1`
+# function to winsorize and then make natural cubic regression spline basis
+# with a sum-to-zero constraint and which is orthogonal to 1. order term. 
+# The latter is to make it easy to test the significance w/ `drop1` or a
+# Wald test.
 sp_w_c <- function(
   x, df = NULL, lb = NULL, ub = NULL, probs = c(.01, .99), 
   Boundary.knots = NULL, knots = NULL, Z = NULL, do_excl_slope = TRUE, 
@@ -76,15 +76,15 @@ sp_w_c <- function(
     # from 
     #   Regression Modeling Strategies with Applications to Linear Models, Logistic and Ordinal Regression and Survival Analysis
     qs <- switch(
-      df - 3L, 
-       `4` = .5,
-       `5` = c(.1, .9), 
-       `6` = c(.1, .5, .9), 
-       `7` = c(.05, .35, .65, .95), 
-       `8` = c(.05, .275, .5, .725, .95), 
-       `9` = c(.05, .23, .41, .59, .77, .95), 
+      df - 1L, 
+      `4` = .5,
+      `5` = c(.1, .9), 
+      `6` = c(.1, .5, .9), 
+      `7` = c(.05, .35, .65, .95), 
+      `8` = c(.05, .275, .5, .725, .95), 
+      `9` = c(.05, .23, .41, .59, .77, .95), 
       `10` = c(.025, .1833, .3417, .5, .6583, .8167, .975), 
-      seq(0, 1, length.out = df - 1L)[-c(1L, df - 1L)])
+      seq(0, 1, length.out = df + 1L)[-c(1L, df + 1L)])
     
     if(length(qs) == 0 | (!qs[1] == 0 && !tail(qs, 1) == 1))
       qs <- c(0, qs, 1)
@@ -98,8 +98,8 @@ sp_w_c <- function(
   
   # apply a sum-to-zero constraint
   require(splines)
-  X <- bs(x, df = df + 1L, intercept = TRUE, knots = knots, 
-          Boundary.knots = Boundary.knots)
+  X <- ns(
+    x, intercept = TRUE, knots = knots, Boundary.knots = Boundary.knots)
   knots <- attr(X, "knots")
   
   if(is.null(Z)){
@@ -135,7 +135,7 @@ makepredictcall.sp_w_c <- function(var, call){
 local({
   set.seed(48350025)
   df <- data.frame(y = rnorm(100), x = rnorm(100, 1, sd = 2))
-  f <- lm(y ~ wz(x) + sp_w_c(x, 4L), df)
+  f <- lm(y ~ wz(x, do_center = FALSE) + sp_w_c(x, 4L), df)
   mm <- model.matrix(f)
   stopifnot(
     ncol(mm) == 5L,
@@ -143,7 +143,10 @@ local({
     predict(f, newdata = df)[1:10] == predict(f, newdata = df[1:10, ]))
   
   # we get the same if we call `bs` and omit the first order term
-  f2 <- lm(y ~ bs(wz(x), 4L), df) 
+  tt <- attr(f$terms, "predvars")[[4]]
+  f2 <- lm(
+    y ~ ns(wz(x, do_center = FALSE), 
+           knots = tt$knots, Boundary.knots = tt$Boundary.knots), df) 
   stopifnot(isTRUE(all.equal(predict(f), predict(f2))))
   
   f3 <- lm(y ~ sp_w_c(x, 4L, do_excl_slope = FALSE), df)

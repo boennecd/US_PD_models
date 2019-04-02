@@ -88,7 +88,7 @@ source(file.path("R", "cycles.R"), echo = TRUE,
        max.deparse.length = 5000)
 
 # change default
-formals(wz)$do_center <- TRUE
+formals(sp_w_c)$do_center <- formals(wz)$do_center <- TRUE
 ```
 
 </div>
@@ -195,6 +195,34 @@ get_plot_device({
 }, "def_w_smooth_redo")
 ```
 
+Plot histograms of covariates
+
+```{r cov_hist}
+par(mar = c(5, 4, .5, .5), mfcol = c(2, 2))
+invisible(sapply(vars, function(n)
+  hist(wz(dat[[n]], do_scale = TRUE), xlab = n, main = "", breaks = 50)))
+
+# look at pca
+local({
+  X <- do.call(cbind, lapply(dat[vars], wz))
+  pc <- prcomp(X, scale. = TRUE)
+  print(round(pc$rotation[nrow(pc$rotation):1, ], 2))
+  
+  col <- colorRampPalette(c("DarkBlue", "White", "DarkGreen"))(256)
+  zlim <- max(abs(pc$rotation))
+  par(mar = c(4, 7, .5, .5))
+  image(t(pc$rotation), axes = FALSE, col = col, zlim = c(-zlim, zlim))
+  x <- colnames(pc$rotation)
+  axis(1, at = seq(0, 1, length.out = length(x)), labels= x, lwd = 0, las = 2)
+  y <- rownames(pc$rotation)
+  axis(2, at = seq(0, 1, length.out = length(y)), labels= y, lwd = 0, las = 1)
+  
+  par(mfcol = c(1, 1), mar = c(5, 4, .5, .5))
+  z <- pc$sdev^2 / sum(pc$sdev^2)
+  plot(z, pch = 16, ylab = "Prop var", ylim = c(0, z[1]))
+})
+```
+
 Make distress plot with GAM model
 
 ```{r distress_plot_gam, cache = 1}
@@ -225,8 +253,8 @@ Create summary statistics table
 ```{r sum_stats}
 local({
   frm_vars <- 
-    ~ wz(dtd) + wz(excess_ret) + wz(r_wcapq_nn) + wz(r_oiadpq_nn) + 
-    wz(r_mv_ltq) + wz(r_niq_nn) + wz(r_ltq_nn) + wz(r_actq_lctq) + wz(sigma) + 
+    ~ wz(dtd) + wz(excess_ret) + wz(r_wcapq_atq) + wz(r_oiadpq_atq) + 
+    wz(r_mv_ltq) + wz(r_niq_atq) + wz(r_ltq_atq) + wz(r_actq_lctq) + wz(sigma) + 
     wz(rel_size) - 1
   
   mm <- model.matrix(frm_vars, dat)
@@ -316,7 +344,7 @@ AIC(f1, f2, f3)
 
 #####
 # what if we add distance-to-default to this model
-f4 <- update(f3, . ~ . + wz(dtd))
+f4 <- update(f1, . ~ . + wz(dtd))
 summary(f4)
 AIC(f1, f2, f3, f4)
 
@@ -350,7 +378,7 @@ AIC(f1, f2, f3, f4, f5, f6, f7)
 
 #####
 # what about the interactions Chava et al. (2004) argues for
-f8 <- update(f7, . ~ . + sic_grp:(wz(r_niq_nn) + wz(r_ltq_nn)))
+f8 <- update(f7, . ~ . + sic_grp:(wz(r_niq_atq) + wz(r_ltq_atq)))
 summary(f8)
 
 # is it significant?
@@ -358,130 +386,19 @@ anova(f5, f7, f8, test = "LRT")
 AIC(f1, f2, f3, f4, f5, f6, f7, f8)
 
 # we remove these for now
-f9 <- update(f8, . ~ . - sic_grp:(wz(r_niq_nn) + wz(r_ltq_nn)) - sic_grp)
+f9 <- update(f8, . ~ . - sic_grp:(wz(r_niq_atq) + wz(r_ltq_atq)) - sic_grp)
 summary(f9)
 AIC(f1, f2, f3, f4, f5, f6, f7, f8, f9)
 
 #####
 # simplify
-f10 <- update(f9, . ~ . - wz(r_req_nn) - wz(r_saleq_nn))
+f10 <- update(f9, . ~ . - wz(r_req_atq) - wz(r_saleq_atq))
 summary(f10)
 AIC(f1, f2, f3, f4, f5, f6, f7, f8, f9, f10)
 
 # keep the last model 
 f0 <- f10
 rm(f1, f2, f3, f4, f5, f6, f7, f8, f9, f10)
-```
-
-</div>
-
-Progressive build model which is easier to follow
-
-<div class="hideable">
-
-```{r more_simple_build, cache = 1}
-frm <- y ~ wz(r_wcapq_atq) + wz(r_req_atq) + 
-  wz(r_oiadpq_atq) + wz(r_mv_ltq) + wz(r_saleq_atq) + wz(r_niq_atq) + 
-  wz(r_ltq_atq) + wz(r_actq_lctq) + wz(sigma) + 
-  wz(excess_ret) + wz(rel_size)
-
-# nice string to use for the included variables
-local({
-  vs <- all.vars(frm)
-  vs <- vs[!vs %in% "y"]
-  cat(paste0(" * ", sapply(vs, get_label), collapse = "\n"))
-})
-
-# fit models
-`size denom` <- glm(frm, binomial("cloglog"), dat)
-summary(`size denom`)
-
-frm <- y ~ wz(r_wcapq_nn) + wz(r_req_nn) + 
-  wz(r_oiadpq_nn) + wz(r_mv_ltq) + wz(r_saleq_nn) + wz(r_niq_nn) + 
-  wz(r_ltq_nn) + wz(r_actq_lctq) + wz(sigma) + 
-  wz(excess_ret) + wz(rel_size)
-`new denom` <- glm(frm, binomial("cloglog"), dat)
-summary(`new denom`)
-
-`add DtD` <- update(`new denom`, . ~ . + wz(dtd))
-summary(`add DtD`)
-
-`add macro` <- update(`add DtD`, . ~ . + log_market_ret + r1y)
-summary(`add macro`)
-
-`simplify mod` <- update(
-  `add macro`, . ~ . - wz(r_req_nn) - wz(r_saleq_nn))
-stopifnot(logLik(`simplify mod`) == logLik(f0))
-
-(aic_tab <- 
-    AIC(`size denom`, `new denom`, `add DtD`, `add macro`, `simplify mod`))
-rm(`size denom`, `new denom`, `add DtD`, `add macro`, `simplify mod`)
-```
-
-```{r more_simple_build_get_html_tab}
-library(tableHTML)
-aic_tab[, 2] <- round(aic_tab[, 2], digits = 2)
-write_tableHTML(
-  tableHTML(aic_tab), file = file.path(
-    "markdown", "output", "glm-aic-tab.html"))
-```
-
-</div>
-
-We can also directly compare with the models @Shumway01 shows result for 
-(as of this writing we do not have the age since listing). Keep in mind 
-that he
-
- 1. uses annual and not monthly data. 
- 2. has a different default definition. 
- 3. uses a different market index. Though, it should not matter much as we 
-    both use a value weighted index as of this writting.
- 4. uses $\sigma$ variable is based on monthly and not daily data.
- 5. has only AMEX and NYSE firms.
- 6. It is another overlapping time period.
- 7. He cumulates returns whereas we use annualized average log monthly return. 
- 
-<div class="hideable">
-
-```{r shum_mods, cache = 1}
-#####
-# Table 2 on page 117. His results are
-#  WC/TA   (r_wcapq_atq)  negative insignificant
-#  RE/TA   (r_req_atq)    negative insignificant
-#  EBIT/TA (r_oiadpq_atq) negative significant
-#  ME/TL   (r_mv_ltq)     negative significant
-#  S/TA    (r_saleq_atq)  postive  insignificant
-s1 <- glm(
-  y ~ wz(r_wcapq_atq) + wz(r_req_atq) + wz(r_oiadpq_atq) + wz(r_mv_ltq) + 
-    wz(r_saleq_atq), 
-  binomial("cloglog"), dat) 
-summary(s1)
-
-#####
-# Table 4 on page 119. His results are
-#  NI/TA (r_niq_atq)   negative significant
-#  TL/TA (r_ltq_atq)   postive  significant
-#  CA/CL (r_actq_lctq) negative insignificant
-s2 <- glm(
-  y ~ wz(r_niq_atq) + wz(r_ltq_atq) + wz(r_actq_lctq), 
-  binomial("cloglog"), dat) 
-summary(s2)
-
-#####
-# Table 6 on page 122. His results are
-#  NI/TA         (r_niq_atq)  negative insignificant
-#  TL/TA         (r_ltq_atq)  postive  significant
-#  Relative size (rel_size)   negative significant
-#  Excess return (excess_ret) negative significant
-#  Sigma         (sigma)      postive  insignificant
-s3 <- glm(
-  y ~ wz(r_niq_atq) + wz(r_ltq_atq) + wz(rel_size) + wz(excess_ret) + 
-    wz(sigma), 
-  binomial("cloglog"), dat) 
-summary(s3)
-
-AIC(s1, s2, s3, f0)
-rm(s1, s2, s3)
 ```
 
 </div>
@@ -494,12 +411,12 @@ Look at standardized coeffcients
 ```{r check_std_coef}
 local({
   fr <- y ~ 
-    wz(r_ltq_nn, do_scale = TRUE) + wz(r_niq_nn, do_scale = TRUE) + 
+    wz(r_ltq_atq, do_scale = TRUE) + wz(r_niq_atq, do_scale = TRUE) + 
     wz(r_actq_lctq, do_scale = TRUE) + wz(sigma, do_scale = TRUE) + 
     wz(excess_ret, do_scale = TRUE) + wz(rel_size, do_scale = TRUE) +
     wz(dtd, do_scale = TRUE) + scale(r1y) + 
-    wz(r_oiadpq_nn, do_scale = TRUE) + wz(r_mv_ltq, do_scale = TRUE) + 
-    scale(log_market_ret) + wz(r_wcapq_nn, do_scale = TRUE)
+    wz(r_oiadpq_atq, do_scale = TRUE) + wz(r_mv_ltq, do_scale = TRUE) + 
+    scale(log_market_ret) + wz(r_wcapq_atq, do_scale = TRUE)
   stopifnot(setequal(all.vars(fr), all.vars(formula(f0))))
   fit <- glm(fr, binomial("cloglog"), dat)
   stopifnot(AIC(fit) == AIC(f0))
@@ -520,6 +437,7 @@ local({
   coe <- coe[order(abs(coe[, 1]), decreasing = TRUE), ]
   coe[] <- sprintf("% 7.3f", coe)
   
+  library(tableHTML)
   write_tableHTML(
     tableHTML(coe), file = file.path(
       "markdown", "output", "glm-std-coef.html"))
@@ -573,37 +491,49 @@ make_resid_vs_covar_plot(f0)
                     .Platform$file.sep))
 -->
 
+```{r com_log_col}
+dat$r_mv_ltq_log <- log(dat$r_mv_ltq)
+```
+
 ```{r splines, cache = 1, dependson = c("winz", "res_diag")}
-s1 <- update(f0, . ~ . + sp_w_c(r_niq_nn, 4L))
+s1 <- update(f0, . ~ . + sp_w_c(r_niq_atq, 3L))
 summary(s1)
 AIC(f0, s1)
 anova(f0, s1, test = "LRT")
 
 # check how the estimated spline looks
-plot_sp_w_c(s1, "r_niq_nn", ylab = "Log-hazard term")()
+plot_sp_w_c(s1, "r_niq_atq", ylab = "Log-hazard term")()
 
 # add spline to sigma -- knot is only chosen as a knot closer towards zero 
 # yields a collinear basis function after weighting
-s2 <- update(s1, . ~ . + sp_w_c(sigma, 4L, knots = .04))
+s2 <- update(s1, . ~ . + sp_w_c(sigma, 3L))
 summary(s2)
 AIC(f0, s1, s2)
 anova(f0, s1, s2, test = "LRT")
 
+plot_sp_w_c(s2, "r_niq_atq", ylab = "Log-hazard term")()
+plot_sp_w_c(s2, "sigma"    , ylab = "Log-hazard term")()
+
+s3 <- update(s2, . ~ . - wz(r_mv_ltq) + wz(r_mv_ltq_log) + 
+               sp_w_c(r_mv_ltq_log, 3L))
+summary(s3)
+
+AIC(f0, s1, s2, s3)
+anova(f0, s1, s2, s3, test = "LRT")
+
 # plot
-plot_list <- list(
-  plot_sp_w_c(s2, "r_niq_nn", ylab = "Log-hazard term"), 
-  plot_sp_w_c(s2, "sigma", ylab = "Log-hazard term"))
 get_plot_device({
-  for(i in plot_list)
-    i()
+  plot_sp_w_c(s3, "r_niq_atq"   , ylab = "Log-hazard term")()
+  plot_sp_w_c(s3, "sigma"       , ylab = "Log-hazard term")()
+  plot_sp_w_c(s3, "r_mv_ltq_log", ylab = "Log-hazard term")()
 }, "spline_plots", onefile = FALSE)
 
 # check residual plots
-make_resid_vs_covar_plot(s2)
-pear_vs_res(s2)
+make_resid_vs_covar_plot(s3)
+pear_vs_res(s3)
 
-s0 <- s2
-rm(s1, s2, plot_list)
+s0 <- s3
+rm(s1, s2, s3)
 ```
 
 </div>
@@ -634,7 +564,7 @@ local({
       add_hist(eval(bquote(wz(.(x))), dat))
     }
   }
-  plot_list <- list(.(r_niq_nn), .(sigma))
+  plot_list <- list(.(r_niq_atq), .(sigma), .(r_mv_ltq_log))
   
   get_plot_device({
     for(i in plot_list)
@@ -650,24 +580,12 @@ Check for interactions
 <div class="hideable">
 
 ```{r check_interact, cache = 1, dependson = "res_diag", fig.height = 8, fig.width = 8}
-#####
-# what do large residuals have in common?
-mr <- local({
-  mm <- predict(s0, type = "terms")
-  mr <- apply(mm, 2, rank)
-  res <- residuals(s0, type = "pearson")
-  mr <- mr[order(res, decreasing = TRUE), ]
-  mr <- mr / nrow(mr)
-})
-# take most extreme  
-rbind(tail = colMeans(tail(mr, 2000)), head = colMeans(head(mr, 2000)))
-
 # do plots
 vars <- list(
-  r_req_nn    = list(quote(wz(r_niq_nn))),
-  r_req_nn    = list(quote(wz(sigma))),
+  r_req_atq    = list(quote(wz(r_niq_atq))),
+  r_req_atq    = list(quote(wz(sigma))),
   rel_size    = list(quote(wz(excess_ret))),
-  r_ltq_nn    = list(quote(wz(dtd))),
+  r_ltq_atq    = list(quote(wz(dtd))),
   # due to Lando et al. (2013)
   actq_lctq   = list(quote(wz(r_actq_lctq))))
 for(i in seq_along(vars)){
@@ -703,7 +621,7 @@ summary(i1)
 AIC(s0, i1)
 anova(s0, i1, test = "LRT")
 
-i2 <- update(i1, . ~ . + wz(r_niq_nn) : wz(dtd)) 
+i2 <- update(i1, . ~ . + wz(r_niq_atq) : wz(dtd)) 
 summary(i2)
 AIC(s0, i1, i2)
 anova(s0, i1, i2, test = "LRT")
@@ -714,17 +632,15 @@ AIC(s0, i1, i2, i3)
 anova(s0, i1, i2, i3, test = "LRT")
 
 # simplify model due to many test
-i0 <- update(i3, . ~ . - wz(r_niq_nn) : wz(dtd) - wz(r_actq_lctq):wz(dtd))
+i0 <- update(i3, . ~ . - wz(r_niq_atq) : wz(dtd) - wz(r_actq_lctq):wz(dtd))
 
 # make plots
 pear_vs_res(i0)
 
-plot_list <- list(
-  plot_sp_w_c(i0, "r_niq_nn", ylab = "Log-hazard term"), 
-  plot_sp_w_c(i0, "sigma", ylab = "Log-hazard term"))
 get_plot_device({  
-  for(i in plot_list)
-    i()
+  plot_sp_w_c(i0, "r_niq_atq", ylab = "Log-hazard term")()
+  plot_sp_w_c(i0, "sigma", ylab = "Log-hazard term")()
+  plot_sp_w_c(i0, "r_mv_ltq_log", ylab = "Log-hazard term")()
 }, "spline_plots_w_interact", onefile = FALSE)
 
 rm(i1, i2, i3)
@@ -757,14 +673,21 @@ local({
   cat("Remember the coefficient estimates\n")
   print(coef(i0))
   
+  keep <- abs(resids) > 1
+  tr <- predict(i0, type = "terms")[keep, ]
   o <- merge(
-    cbind(dat[, vs], resids = resids)[abs(resids) > 1, ], 
+    cbind(dat[, vs], resids = resids)[keep, ], 
     with(dat, data.frame(tstop, gvkey, mast_issr_num, conm, 
                          date = make_ym_inv(tstop))), 
     by = c("gvkey", "tstop"))
-  o <- tail(o[order(abs(o$resids)), ], 5)
+  tr <- tail(tr[order(abs(o$resids)), ], 5)
+  o  <- tail(o [order(abs(o$resids)), ], 5)
   rownames(o) <- nrow(o):1
-  o
+  cat("Covs\n")
+  print(o)
+  
+  cat("\nTerms\n")
+  print(tr)
 })
 ```
 
