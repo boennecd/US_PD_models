@@ -96,6 +96,35 @@ vars <- c("r_wcapq_atq", "r_req_atq", "r_oiadpq_atq", "r_mv_ltq",
           "r_saleq_atq", "r_niq_atq", "r_ltq_atq", "r_actq_lctq", "sigma",
           "excess_ret", "rel_size")
 
+# keep only complete case
+nrow(dat)
+dat <- dat[complete.cases(dat[, vars]), ]
+nrow(dat)
+
+# we will use these log scaled variables later
+dat <- within(dat, {
+  stopifnot(
+    all(r_mv_ltq > 0), all(atq_defl > 0), all(actq_defl > 0), 
+    !anyNA(atq_defl), !anyNA(actq_defl))
+  r_mv_ltq_log <- log(r_mv_ltq)
+  atq_defl_log <- log(atq_defl) 
+  actq_defl_log <- log(actq_defl)
+})
+vars <- c(vars, "atq_defl_log", "actq_defl_log")
+
+# there is a trend in the three variables 
+local({
+  func <- function(x, ti){
+    o <- do.call(rbind, tapply(x, ti, quantile, probs = c(.25, .5, .75)))
+    matplot(o, lty = c(3, 1, 3), type = "l", col = "black", ylab = 
+              paste(deparse(substitute(x)), "quantiles"))
+  }
+  
+  with(dat, func(atq_defl_log , tstart))
+  with(dat, func(actq_defl_log, tstart))
+  with(dat, func(rel_size     , tstart))
+})
+
 # check cor
 local({
   tmp <- cor(dat[, c(vars, "dtd")], use = "pairwise.complete.obs")
@@ -110,14 +139,6 @@ local({
   tmp[upper.tri(tmp, diag = TRUE)] <- NA_real_
   print(tmp[-1, ], na.print = "")
 })
-
-# keep only complete case
-nrow(dat)
-dat <- dat[complete.cases(dat[, vars]), ]
-nrow(dat)
-
-# we will use the log scaled variable later
-dat$r_mv_ltq_log <- log(dat$r_mv_ltq)
 
 # redo-distress rate plot 
 get_plot_device({

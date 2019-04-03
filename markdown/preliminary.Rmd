@@ -171,8 +171,30 @@ summary(f9)
 AIC(f1, f2, f3, f4, f5, f6, f7, f8, f9)
 
 #####
-# simplify
-f10 <- update(f9, . ~ . - wz(r_req_atq) - wz(r_saleq_atq))
+# try different size measures
+local({
+  func <- function(x){
+    cat("\nCoef(", deparse(substitute(x)), "):\n", sep = "")
+    print(coef(x))
+  }
+  
+  s1 <- update(f9, . ~ . - wz(rel_size) + wz(atq_defl_log ))
+  s2 <- update(f9, . ~ . - wz(rel_size) + wz(actq_defl_log))
+  s3 <- update(f9, . ~ .                + wz(atq_defl_log ))
+  s4 <- update(f9, . ~ .                + wz(actq_defl_log))
+  
+  func(s1)
+  func(s2)
+  func(s3)
+  func(s4)
+  
+  AIC(s1, s2, s3, s4, f9)
+})
+
+#####
+# simplify and add a new size measure
+f10 <- update(
+  f9, . ~ wz(actq_defl_log) + . - wz(r_req_atq) - wz(r_saleq_atq))
 summary(f10)
 AIC(f1, f2, f3, f4, f5, f6, f7, f8, f9, f10)
 
@@ -180,6 +202,37 @@ AIC(f1, f2, f3, f4, f5, f6, f7, f8, f9, f10)
 f0 <- f10
 rm(f1, f2, f3, f4, f5, f6, f7, f8, f9, f10)
 ```
+
+The effect of current assets may seem odd when `rel_size` is included. Fit 
+a GAM to see association.
+
+```{r check_actq_defl_log_effect, cache = 1}
+library(mgcv)
+library(parallel)
+library(RColorBrewer)
+(function(){
+  cl <- makeCluster(6L)
+  on.exit(stopCluster(cl))
+  dat_use <- with(
+    dat, data.frame(
+      y, rel_size = unclass(wz(rel_size, do_center = FALSE)), 
+      actq_defl_log = unclass(wz(actq_defl_log, do_center = FALSE))))
+  fit <- bam(y ~ te(rel_size, actq_defl_log, k = c(15, 15), bs = "cs"), 
+             binomial("cloglog"), dat_use, cluster = cl)
+  print(summary(fit))
+  for(i in 0:3)
+    vis.gam(fit, c("rel_size", "actq_defl_log"), theta=-35 + 90 * i, 
+            ticktype = "detailed", color = "gray")
+  
+  # show kernel density plot to strees that there is mainly data in some 
+  # regions
+  library(MASS)
+  dens <- kde2d(dat_use$rel_size, dat_use$actq_defl_log, n = 100) 
+  image(dens, col = colorRampPalette(brewer.pal(7, "Blues"))(30), 
+        xlab = "rel_size", ylab = "actq_defl_log")
+})()
+```
+
 
 </div>
 
@@ -196,7 +249,8 @@ local({
     wz(excess_ret, do_scale = TRUE) + wz(rel_size, do_scale = TRUE) +
     wz(dtd, do_scale = TRUE) + scale(r1y) + 
     wz(r_oiadpq_atq, do_scale = TRUE) + wz(r_mv_ltq, do_scale = TRUE) + 
-    scale(log_market_ret) + wz(r_wcapq_atq, do_scale = TRUE)
+    scale(log_market_ret) + wz(r_wcapq_atq, do_scale = TRUE) + 
+    wz(actq_defl_log, do_scale = TRUE)
   stopifnot(setequal(all.vars(fr), all.vars(formula(f0))))
   fit <- glm(fr, binomial("cloglog"), dat)
   stopifnot(AIC(fit) == AIC(f0))

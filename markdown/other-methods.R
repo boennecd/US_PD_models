@@ -37,7 +37,8 @@ source(knitr::purl(file.path("markdown", "setup.Rmd"), output = tempfile()))
 # formulas that we use later
 f0 <- y ~ wz(r_wcapq_atq) + wz(r_oiadpq_atq) + wz(r_mv_ltq) + 
   wz(r_niq_atq) + wz(r_ltq_atq) + wz(r_actq_lctq) + wz(sigma) + 
-  wz(excess_ret) + wz(rel_size) + wz(dtd) + log_market_ret + r1y
+  wz(excess_ret) + wz(rel_size) + wz(dtd) + log_market_ret + r1y + 
+  wz(actq_defl_log)
 
 i0 <- update(
   f0, . ~ . + sp_w_c(r_niq_atq, 3) + sp_w_c(sigma, 3) - wz(r_mv_ltq) + 
@@ -46,16 +47,32 @@ i0 <- update(
 #####
 # glmnet
 library(glmnet)
-func <- function(frm, data, do_cv, lambda = NULL, family = "binomial"){
+func <- function(frm, data, do_cv, lambda = NULL, family = "binomial", 
+                 foldid){
   mf <- model.frame(frm, data)
   X <- model.matrix(terms(mf), mf)
   X <- X[, colnames(X) != "(Intercept)"]
   y <- model.response(mf)
-  if(do_cv)
-   return(cv.glmnet(X, y, type.measure = "deviance", nfolds = 10, alpha = 0, 
-                    family = family))
   
-  glmnet(X, y, alpha = 0, lambda = lambda, family = family)
+  cl <- quote(xyz(X, y, alpha = 0, family = family))
+  
+  if(do_cv){
+    library(parallel)
+    library(doParallel)
+    registerDoParallel(6L)
+    on.exit(stopImplicitCluster())
+    
+    
+    cl[c("type.measure", "parallel")] <- list("deviance", TRUE)
+    if(!missing(foldid))
+      cl[["foldid"]] <- quote(foldid)
+    cl[[1L]] <- quote(cv.glmnet)
+    return(eval(cl, environment()))
+  }
+  
+  cl[[1L]] <- quote(glmnet)
+  cl["lambda"] <- lambda
+  eval(cl, environment())
 }
 
 set.seed(24203767)
@@ -69,6 +86,28 @@ min(log(g2$lambda))
 glm_fit <- glm(i0, binomial(), dat)
 cbind(coef(g2)[, 95:100], i0 = coef(glm_fit))
 
+# cross-validation where we sample periods. Make breaks
+n_brs <- 11L
+brs <- dat$tstop
+brs <- seq.int(min(brs), max(brs), length.out = n_brs)
+brs <- as.integer(brs)
+brs[n_brs] <- max(dat$tstop)
+brs[1] <- brs[1] - 1L
+
+# make dummies
+labs <- paste0(
+  "(", format(make_ym_inv(brs[-n_brs]), "%Y-%m"), ", " ,
+  format(make_ym_inv(brs[-1]), "%Y-%m"), "]")
+
+dat$year_dummy <- cut(dat$tstop, breaks = brs, labels = labs)
+stopifnot(!anyNA(dat$year_dummy))
+table(dat$year_dummy, dat$y)
+
+# run cross-validation
+set.seed(24203767)
+g3 <- func(i0, dat, do_cv = TRUE, foldid = as.integer(dat$year_dummy))
+saveRDS_ask(g3, file.path("markdown", "cache", "glmnet-cv-years.RDS"))
+plot(g3)
 
 #####
 # boosted trees

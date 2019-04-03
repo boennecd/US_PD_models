@@ -1,6 +1,6 @@
 PackratFormat: 1.4
 PackratVersion: 0.4.9.3
-RVersion: 3.5.2
+RVersion: 3.5.3
 Repos: CRAN=https://cran.rstudio.com/
 
 Package: BH
@@ -45,6 +45,12 @@ Version: 0.3.3.4.0
 Hash: b84de17dacf31807f222f0a5229a50b4
 Requires: Rcpp
 
+Package: Rook
+Source: CRAN
+Version: 1.1-1
+Hash: d53d9e345096f5c8b5c535dfe9175e2f
+Requires: brew
+
 Package: SparseM
 Source: CRAN
 Version: 1.77
@@ -81,6 +87,11 @@ Source: CRAN
 Version: 1.0-6
 Hash: 67d0775189fd0041d95abca618c5c07e
 
+Package: brew
+Source: CRAN
+Version: 1.0-6
+Hash: 931f9972deae0f205e1c78a51f33149b
+
 Package: caTools
 Source: CRAN
 Version: 1.17.1.1
@@ -106,8 +117,8 @@ Requires: rematch, tibble
 
 Package: cli
 Source: CRAN
-Version: 1.0.0
-Hash: f4239f89feb7ddc65821e4514e9734ae
+Version: 1.1.0
+Hash: bc4e54014c2049f2605ad0c3ba0cce6b
 Requires: assertthat, crayon
 
 Package: colorspace
@@ -156,14 +167,20 @@ Requires: stringr
 
 Package: fansi
 Source: CRAN
-Version: 0.3.0
-Hash: 8d0a24d8245abbfa2b030460734495ab
+Version: 0.4.0
+Hash: f147621f72b561485bfffcae78c4f5d5
 
 Package: forcats
 Source: CRAN
 Version: 0.3.0
 Hash: 770f3834b97a2c429bdecb7a5f27eb25
 Requires: magrittr, rlang, tibble
+
+Package: foreach
+Source: CRAN
+Version: 1.4.4
+Hash: 4df5ab2c8c35382dacab75d414da6748
+Requires: iterators
 
 Package: ggplot2
 Source: CRAN
@@ -176,6 +193,12 @@ Package: git2r
 Source: CRAN
 Version: 0.23.0
 Hash: f7190a7a4b5c5f0983b4b6ee29ed7bc3
+
+Package: glmnet
+Source: CRAN
+Version: 2.0-16
+Hash: 99b8a0322dff077a3eb167b83681ca5a
+Requires: foreach
 
 Package: glue
 Source: CRAN
@@ -221,6 +244,11 @@ Source: CRAN
 Version: 1.3.1
 Hash: 2d32e01e53d532c812052e27a1021441
 Requires: R6, curl, jsonlite, mime, openssl
+
+Package: iterators
+Source: CRAN
+Version: 1.0.10
+Hash: 9f8af91e4a3487a282d7dea67513e519
 
 Package: jsonlite
 Source: CRAN
@@ -341,14 +369,19 @@ Requires: lme4
 
 Package: pillar
 Source: CRAN
-Version: 1.3.0
-Hash: 3e43f774fa6dfba877caca1aebbeaa6a
+Version: 1.3.1
+Hash: 9ed4c2a5d3047bfba3e852ad5e806d91
 Requires: cli, crayon, fansi, rlang, utf8
 
 Package: pkgconfig
 Source: CRAN
 Version: 2.0.2
 Hash: b0fd6ed908e150b77e5f00c6478bd58c
+
+Package: plogr
+Source: CRAN
+Version: 0.2.0
+Hash: 81a8008a5e7858552503935f1abe48aa
 
 Package: plyr
 Source: CRAN
@@ -399,8 +432,8 @@ Requires: curl, data.table, haven, openxlsx, readxl, tibble
 
 Package: rlang
 Source: CRAN
-Version: 0.2.2
-Hash: 49b735b7b1d14f561d21cce12c6703df
+Version: 0.3.3
+Hash: 4dbc6ee05f1a6802b24608d8d38f6496
 
 Package: rmarkdown
 Source: CRAN
@@ -467,9 +500,9 @@ Requires: htmltools, magrittr, shiny
 
 Package: tibble
 Source: CRAN
-Version: 1.4.2
-Hash: 83895360ce4f8d2ce92eee00526b5b0b
-Requires: cli, crayon, pillar, rlang
+Version: 2.1.1
+Hash: e9d844f966bd4d40556b50c3b2239646
+Requires: cli, crayon, fansi, pillar, pkgconfig, rlang
 
 Package: tinytex
 Source: CRAN
@@ -501,6 +534,12 @@ Package: xfun
 Source: CRAN
 Version: 0.3
 Hash: 3b1cb5fdcfb96c88e3f9ab0239fbd048
+
+Package: xgboost
+Source: CRAN
+Version: 0.82.1
+Hash: 41408633b829dccf2ed969e4e254c0ef
+Requires: data.table, magrittr, stringi
 
 Package: xtable
 Source: CRAN
