@@ -75,20 +75,40 @@ stopifnot(all(dat$stop - dat$start == 1))
 
 #####
 # plot size of risk set and distress rate through time
-ns <- tapply(dat$y, dat$tstop, length)
-ti <- as.integer(names(ns))
-ti <- make_ym_inv(as.integer(ti + sign(ti) * 1e-2))
+local({
+  ns <- tapply(dat$y, dat$tstop, length)
+  ti <- as.integer(names(ns))
+  ti <- make_ym_inv(as.integer(ti + sign(ti) * 1e-2))
+  
+  # number of observations by date
+  plot(ns ~ ti, type = "l", ylim = range(ns, 0), 
+       ylab = "Number of observations", xlab = "Time")
+  
+  # distress rate by date
+  get_plot_device({
+    n_distress <- tapply(dat$y, dat$tstop, sum)
+    plot(n_distress / ns ~ ti, type = "h", xlab = "Time", ylab = "Distress rate")
+    lines(smooth.spline(ti, n_distress/ns), lwd = 2, col = "DarkGreen")
+  }, "def_w_smooth")
+})
 
-# number of observations by date
-plot(ns ~ ti, type = "l", ylim = range(ns, 0), 
-     ylab = "Number of observations", xlab = "Time")
 
-# distress rate by date
-get_plot_device({
-  n_distress <- tapply(dat$y, dat$tstop, sum)
-  plot(n_distress / ns ~ ti, type = "h", xlab = "Time", ylab = "Distress rate")
-  lines(smooth.spline(ti, n_distress/ns), lwd = 2, col = "DarkGreen")
-}, "def_w_smooth")
+# have to deal with recurrent events which are not directly supported by 
+# with the functions we use
+library(data.table)
+dat <- data.table(dat)
+setkey(dat, gvkey, tstart) # sort data
+# assumes that data is sorted
+func <- function(y){
+  y <- cumsum(y)
+  y <- c(0, head(y, -1))
+  c("", paste0(".", letters))[y + 1L]
+}
+func(c(F, F, F, T, F, F, T, F, T)) # example
+dat[, gvkey_unique := paste0(gvkey, func(y)), by = gvkey]
+stopifnot(all(dat[, sum(y) %in% 0:1, by = gvkey_unique]$V1))
+dat <- as.data.frame(dat)
+dat$gvkey_unique <- as.integer(as.factor(dat$gvkey_unique))
 
 #####
 # remove observations with missing data
@@ -207,9 +227,9 @@ Create summary statistics table
 ```{r sum_stats}
 local({
   frm_vars <- 
-    ~ wz(dtd) + wz(excess_ret) + wz(r_wcapq_atq) + wz(r_oiadpq_atq) + 
-    wz(r_mv_ltq) + wz(r_niq_atq) + wz(r_ltq_atq) + wz(r_actq_lctq) + wz(sigma) + 
-    wz(rel_size) - 1
+    ~ dtd + excess_ret + r_wcapq_atq + r_oiadpq_atq + 
+    r_mv_ltq + r_niq_atq + r_ltq_atq + r_actq_lctq + sigma + 
+    rel_size + actq_defl_log - 1
   
   mm <- model.matrix(frm_vars, dat)
   vs <- all.vars(frm_vars)

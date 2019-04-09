@@ -50,18 +50,6 @@ knitr::opts_chunk$set(
     paste0(file.path("fig"  , "rng-effects"), .Platform$file.sep))
 ```
 
-```{r def_data_files}
-# assign file names
-fs <- list(
-  dat          = file.path("data", "final.RDS"), 
-  regres_funcs = file.path("R", "regres_funcs.R"))
-```
-
-```{r check_rebuild, echo = FALSE, cache = TRUE, cache.extra = tools::md5sum(unlist(fs))}
-# see https://stackoverflow.com/a/52163751/5861244
-knitr::opts_chunk$set(cache.rebuild = TRUE)
-```
-
 ```{r setup, include=FALSE, cache=FALSE}
 # please do set options here that could change...
 knitr::opts_chunk$set(
@@ -70,117 +58,7 @@ knitr::opts_chunk$set(
 options(digits = 4, scipen = 10, width = 90)
 ```
 
-Source scripts with the R functions we need 
-
-<div class="hideable">
-
-```{r source_r_funcs}
-source(fs$regres_funcs, echo = TRUE, max.deparse.length = 5000)
-source(file.path("R", "get_plot_device.R"), echo = TRUE, 
-       max.deparse.length = 5000)
-source(file.path("R", "get_label.R"), echo = TRUE, 
-       max.deparse.length = 5000)
-source(file.path("R", "cycles.R"), echo = TRUE, 
-       max.deparse.length = 5000)
-
-# change default. It decreases the computation time
-formals(wz)$do_center <- TRUE
-```
-
-</div>
-
-Load the data
-
-```{r load_dat}
-tmp <- readRDS(fs$dat)
-dat <- tmp$data
-make_ym <- tmp$ym_funcs$make_ym
-make_ym_inv <- tmp$ym_funcs$make_ym_inv
-
-# the branch and commit id the data set was made with 
-tmp$git_info
-rm(tmp)
-```
-
-Show some properties and prepare the data
-
-<div class="hideable">
-
-```{r show_prop}
-# exclude firms before they are first rated or after they stop being rated
-(o <- with(dat, table(
-  y,
-  `before first rating date` = tstart < start_rated_ym, 
-  `after last rating date`   = tstop  > stop_rated_ym,
-  useNA = "ifany")))
-round(prop.table(o, margin = 2:3), 5)
-
-table(dat$y)
-dat <- subset(dat, !is.na(start_rated_ym) & tstart >= start_rated_ym)
-table(dat$y)
-dat <- subset(dat, tstop <= stop_rated_ym) 
-table(dat$y)
-
-# starts and ends dates
-make_ym_inv(min(dat$tstart))
-make_ym_inv(max(dat$tstop))
-
-# tstop of last event. We assume this is the most recent data from Moodys
-max_is_ev <- with(subset(dat, y == TRUE), max(tstop))
-make_ym_inv(max_is_ev)
-dat <- subset(dat, tstop <= max_is_ev)
-
-# max time between stop time and event. Most happen in the same month of the
-# observations. Thus, we may miss only a few events in the end of the sample
-table(with(subset(dat, y), distress_time - tstop))
-
-# we assume that a macro avariable is included to all such that each 
-# row represents one month. Otherwise we need to change in the rest of 
-# this file...
-stopifnot(all(dat$stop - dat$start == 1))
-
-# have to deal with recurrent events which are not directly supported by 
-# with the functions we use
-library(data.table)
-dat <- data.table(dat)
-setkey(dat, gvkey, tstart) # sort data
-# assumes that data is sorted
-func <- function(y){
-  y <- cumsum(y)
-  y <- c(0, head(y, -1))
-  c("", paste0(".", letters))[y + 1L]
-}
-func(c(F, F, F, T, F, F, T, F, T)) # example
-dat[, gvkey_unique := paste0(gvkey, func(y)), by = gvkey]
-stopifnot(all(dat[, sum(y) %in% 0:1, by = gvkey_unique]$V1))
-dat <- as.data.frame(dat)
-dat$gvkey_unique <- as.integer(as.factor(dat$gvkey_unique))
-
-#####
-# remove observations with missing data
-vars <- c("r_wcapq_atq", "r_req_atq", "r_oiadpq_atq", "r_mv_ltq",
-          "r_saleq_atq", "r_niq_atq", "r_ltq_atq", "r_actq_lctq", "sigma",
-          "excess_ret", "rel_size")
-
-# check cor
-local({
-  tmp <- cor(dat[, c(vars, "dtd")], use = "pairwise.complete.obs")
-  tmp[abs(tmp) < 0.3] <- NA_real_
-  tmp[upper.tri(tmp, diag = TRUE)] <- NA_real_
-  print(tmp[-1, ], na.print = "")
-  
-  cat("\n\nWinsorized\n")
-  tmp <- cor(dat[, c(vars, "dtd")], use = "pairwise.complete.obs")
-  tmp <- apply(tmp, 2, wz)
-  tmp[abs(tmp) < 0.3] <- NA_real_
-  tmp[upper.tri(tmp, diag = TRUE)] <- NA_real_
-  print(tmp[-1, ], na.print = "")
-})
-
-# keep only complete case
-nrow(dat)
-dat <- dat[complete.cases(dat[, vars]), ]
-nrow(dat)
+```{r run_setup, child = 'setup.Rmd'}
 ```
 
 ## Model without random effects
@@ -190,12 +68,11 @@ Fit model without random effects
 <div class="hideable">
 
 ```{r ass_frm_dd, cache = 1}
-frm <- y ~ wz(r_wcapq_nn) + wz(r_oiadpq_nn) + wz(r_mv_ltq) + wz(r_niq_nn) + 
-  wz(r_ltq_nn) + wz(r_actq_lctq) + wz(sigma) + wz(excess_ret) + 
-  wz(rel_size) + wz(dtd) + log_market_ret + r1y + sp_w_c(r_niq_nn, 4) +
-  # knot is only chosen as a knot closer towards zero 
-  # yields a collinear basis function after weighting
-  sp_w_c(sigma, 4, knots = .04) + wz(r_actq_lctq):wz(sigma)
+frm <- y ~ wz(actq_defl_log) + wz(r_wcapq_atq) + wz(r_oiadpq_atq) + 
+  wz(r_niq_atq) + wz(r_ltq_atq) + wz(r_actq_lctq) + wz(sigma) + 
+  wz(excess_ret) + wz(rel_size) + wz(dtd) + log_market_ret + 
+  r1y + sp_w_c(r_niq_atq, 3) + sp_w_c(sigma, 3) + wz(r_mv_ltq_log) + 
+  sp_w_c(r_mv_ltq_log, 3) + wz(r_actq_lctq):wz(sigma)
 ```
 
 
@@ -208,47 +85,74 @@ logLik(base_fit)
 
 </div>
 
-Fit models with time fixed effects and interactions to show variation 
-through time
+Fit models with varying coefficient 
 
 <div class="hideable">
 
 ```{r check_time_var_rel_size, cache = 1}
-# make breaks
-n_brs <- 8L
-brs <- dat$tstop
-brs <- seq.int(min(brs), max(brs), length.out = n_brs)
-brs <- as.integer(brs)
-brs[n_brs] <- max(dat$tstop)
-brs[1] <- brs[1] - 1L
-
-# make dummies
-labs <- paste0(
-  "(", format(make_ym_inv(brs[-n_brs]), "%Y-%m"), ", " ,
-  format(make_ym_inv(brs[-1]), "%Y-%m"), "]")
-
-dat$year_dummy <- cut(dat$tstop, breaks = brs, labels = labs)
-stopifnot(!anyNA(dat$year_dummy))
-table(dat$year_dummy, dat$y)
-
 # run regression
+library(splines)
 local({
-  t0 <- update(base_fit, . ~ . + year_dummy - 1)
+  plot_var_coef <- function(var, fit){
+    # get spline basis
+    tr <- fit$terms
+    tstart_spline_idx <- which(
+      grepl("^ns\\(tstart", names(attr(tr,"dataClasses"))))
+    stopifnot(length(tstart_spline_idx) == 1L)
+    x <- data.frame(tstart = sort(unique(fit$data$tstart)))
+    x_basis <- eval(
+      attr(tr, "predvars")[c(1L, tstart_spline_idx + 1L)], x)[[1L]]
+    
+    # get coefficients
+    var_expr <- deparse(substitute(var))
+    idx_term <- which(grepl(paste0("(?<!sp_w_c\\()", var_expr), 
+                            attr(tr, "term.labels"), perl = TRUE))
+    stopifnot(length(idx_term) == 1L)
+    
+    asg <- model.matrix(tr, fit$data[1, ])
+    idx_coef <- which(attr(asg, "assign") == idx_term)
+    co <- coef(fit)[idx_coef]
+    
+    # plot
+    y <- x_basis %*% co
+    se <- diag(tcrossprod(x_basis %*% vcov(fit)[idx_coef, idx_coef], x_basis))
+    se <- sqrt(se)
+    lb <- y - 1.96 * se
+    ub <- y + 1.96 * se
+    matplot(x, cbind(lb, y, ub), lty = c(3, 1, 3), type = "l", col = "black", 
+            xlab = "Time", ylab = paste("Coef", var_expr))
+  }
+  
+  t0 <- update(base_fit, . ~ . + ns(tstart, df = 6, intercept = TRUE) - 1L)
   print(summary(t0))
   
-  t1 <- update(
-    t0, . ~ . - wz(rel_size) + wz(rel_size):year_dummy)
+  up <- function(fit, x){
+    fit <- substitute(fit)
+    x <- substitute(x)
+    eval(bquote(
+      update(.(fit), . ~ . - .(x) + 
+               .(x) : ns(tstart, df = 6, intercept = TRUE))), 
+      parent.frame()) 
+  }
+  t1 <- up(t0, wz(rel_size))
   print(summary(t1))
+  plot_var_coef(rel_size, t1)
   
-  t2 <- update(
-    t1, . ~ . - wz(r_niq_nn) + wz(r_niq_nn):year_dummy)
+  # use different size measure
+  t1.a <- up(t0, wz(actq_defl_log))
+  summary(t1.a)
+  plot_var_coef(actq_defl_log, t1.a)
+  
+  t2 <- up(t1, wz(r_niq_atq))
   print(summary(t2))
+  plot_var_coef(r_niq_atq, t2)
   
   # industry effects
-  t3 <- update(t2, . ~ . + sic_grp:year_dummy)
+  t3 <- up(t2, sic_grp)
   print(summary(t3))
   
-  anova(base_fit, t0, t1, t2, t3, test = "LRT")
+  print(anova(base_fit, t0, t1.a,         test = "LRT"))
+  print(anova(base_fit, t0, t1  , t2, t3, test = "LRT"))
 })
 ```
 
@@ -280,7 +184,7 @@ library(dynamichazard)
 
 ```{r set_n_threads}
 # set number of threads
-n_threads <- 8L
+n_threads <- 6L
 ```
 
 ```{r set_ctrl_default}
@@ -346,7 +250,7 @@ Take more iterations
 
 ```{r def_take_xtra, cache = 1}
 take_xtra <- function(
-  fit, n_max = 1000L, trace = 0L, N_fw_n_bw = 1000L, N_smooth = 2500L, 
+  fit, n_max = 1000L, trace = 0L, N_fw_n_bw = 500L, N_smooth = 1000L, 
   N_first = N_fw_n_bw, N_smooth_final = N_smooth, averaging_start = 200L, 
   eps = 1e-5){
   cl <- fit$call
@@ -396,7 +300,7 @@ take_xtra <- function(
 ```{r xtra_fit_duffie_09, cache = 1, dependson = "fit_duffie_09"}
 set.seed(seed)   
 log_n_eval({
-  duffie_09_xtra <- take_xtra(duffie_09, trace = 1L)
+  duffie_09_xtra <- take_xtra(duffie_09, trace = 1L, averaging_start = 80L)
 }, "_duffie_09_xtra")
 ```
 
@@ -711,7 +615,8 @@ plot_sp_w_c <- function(term, ddfit, base = base_fit, xlab, vals_only = FALSE){
   lines(x, l2_ub, lty = 2, col = "DarkGray")
 }
 plot_sp_w_c("sigma"   , state_rng_inter_large, xlab = get_label("sigma"))
-plot_sp_w_c("r_niq_nn", state_rng_inter_large, xlab = get_label("r_niq_nn"))
+plot_sp_w_c("r_niq_atq", state_rng_inter_large, xlab = get_label("r_niq_atq"))
+plot_sp_w_c("r_mv_ltq_log", state_rng_inter_large, xlab = get_label("r_mv_ltq_log"))
 
 ##### 
 # log-likelihood and AIC approximations
@@ -907,8 +812,13 @@ local({
   plot(ti, tr, type = "l")
 })
 
-plot_sp_w_c("sigma"   , state_rng_size_restrict_large, xlab = get_label("sigma"))
-plot_sp_w_c("r_niq_nn", state_rng_size_restrict_large, xlab = get_label("r_niq_nn"))
+plot_sp_w_c(
+  "sigma"   , state_rng_size_restrict_large, xlab = get_label("sigma"))
+plot_sp_w_c(
+  "r_niq_atq", state_rng_size_restrict_large, xlab = get_label("r_niq_atq"))
+plot_sp_w_c(
+  "r_mv_ltq_log", state_rng_size_restrict_large, xlab = 
+    get_label("r_mv_ltq_log"))
 
 #####
 # effective sample size and AIC
@@ -971,8 +881,11 @@ state_rng_size_derivs <-
 ```
 
 ```{r show_sd_w_size_rng}
-solve(state_rng_size_derivs$state$neg_obs_info)
-sqrt(diag(solve(state_rng_size_derivs$state$neg_obs_info)))
+local({
+  idx <- c(1, 4:8)
+  print(x <- solve(state_rng_size_derivs$state$neg_obs_info[idx, idx]))
+  print(sqrt(diag(x)))
+})
 
 sqrt(diag(solve(state_rng_size_derivs$observation$neg_obs_info)))
 ```
@@ -1005,6 +918,14 @@ log_n_eval({
 ```
 
 Take more iterations
+
+<!-- 
+  knitr::opts_knit$set(output.dir = ".")
+  knitr::load_cache(
+      "xtra_unrestricted_w_size_state_rng", 
+      path = paste0(file.path("markdown", "cache", "rng-effects"), 
+                    .Platform$file.sep))
+--> 
 
 ```{r xtra_unrestricted_w_size_state_rng, cache = 1, dependson = "unrestricted_w_size_state_rng"}
 set.seed(seed)   
@@ -1071,8 +992,13 @@ get_plot_device(
 
 compare_fix(state_rng_size_unrestrict_large, "comp-fix-inter-rel-size-unrestrict")
 
-plot_sp_w_c("sigma"   , state_rng_size_unrestrict_large, xlab = get_label("sigma"))
-plot_sp_w_c("r_niq_nn", state_rng_size_unrestrict_large, xlab = get_label("r_niq_nn"))
+plot_sp_w_c(
+  "sigma"   , state_rng_size_unrestrict_large, xlab = get_label("sigma"))
+plot_sp_w_c(
+  "r_niq_atq", state_rng_size_unrestrict_large, xlab = get_label("r_niq_atq"))
+plot_sp_w_c(
+  "r_mv_ltq_log", state_rng_size_unrestrict_large, xlab = 
+    get_label("r_mv_ltq_log"))
 
 #####
 # effective sample size and AIC
@@ -1082,135 +1008,6 @@ plot_eff(state_rng_size_unrestrict_large)
 
 AIC(base_fit, duffie_09_xtra, state_rng_inter_large, 
     state_rng_size_restrict_large, state_rng_size_unrestrict_large)
-```
-
-</div>
-
-### Add random slope for net income to size
-
-<div class="hideable">
-
-<!-- 
-  knitr::opts_knit$set(output.dir = ".")
-  knitr::load_cache(
-      "restricted_w_niq_size_state_rng", 
-      path = paste0(file.path("markdown", "cache", "rng-effects"), 
-                    .Platform$file.sep))
---> 
-
-```{r restricted_w_niq_size_state_rng, cache = 1, dependson = "dd_fixed"}
-set.seed(seed)
-log_n_eval({
-  state_rng_niq_size_restrict <- PF_EM(
-    fixed = frm_fixed, random = ~ 1 + wz(rel_size) + wz(r_niq_nn),  
-    data = dat, model = "cloglog", by = 1L, max_T = max(dat$tstop), 
-    id = dat$gvkey_unique, type = "VAR",  Q_0 = diag(1, 3),
-    
-    J = diag(1, 3), psi = log(c(0.1272, .05, .1)),
-    G = matrix(c(1, 0, 0,
-                 0, 0, 0,
-                 0, 0, 0,
-                 0, 0, 0,
-                 0, 1, 0,
-                 0, 0, 0,
-                 0, 0, 0, 
-                 0, 0, 0,
-                 0, 0, 1), byrow = TRUE, ncol = 3), theta = c(.9, .9, .1), 
-    K = diag(3), phi = c(2.95, 0, 0),
-    
-    control = ctrl_default, 
-    trace = 1L)
-}, "_state_rng_niq_size_restrict")
-```
-
-Take more iterations
-
-<!--
-  knitr::opts_knit$set(output.dir = ".")
-  knitr::load_cache(
-      "xtra_restricted_w_niq_size_state_rng", 
-      path = paste0(file.path("markdown", "cache", "rng-effects"), 
-                    .Platform$file.sep))
--->
-
-```{r xtra_restricted_w_niq_size_state_rng, cache = 1, dependson = "restricted_w_niq_size_state_rng"}
-set.seed(seed)   
-log_n_eval({
-  state_rng_niq_size_restrict_xtra <- take_xtra(
-    state_rng_niq_size_restrict, trace = 1L)
-}, "_state_rng_niq_size_restrict_xtra")
-```
-
-<!--
-  knitr::opts_knit$set(output.dir = ".")
-  knitr::load_cache(
-      "large_restricted_w_niq_size_state_rng", 
-      path = paste0(file.path("markdown", "cache", "rng-effects"), 
-                    .Platform$file.sep))
--->
-
-```{r large_restricted_w_niq_size_state_rng, cache = 1, dependson = "xtra_restricted_w_niq_size_state_rng"}
-state_rng_niq_size_restrict_large <- take_xtra(
-  state_rng_niq_size_restrict_xtra, n_max = 1L, N_fw_n_bw = 2000L, 
-  N_smooth = 10000L, N_smooth_final = 2500L, N_first = 2500L)
-```
-
-</div>
-
-Check results
-
-<div class="hideable">
-
-```{r show_restricted_w_niq_size_state_rng}
-#####
-# approx log-likelihood
-local({
-  n <- length(state_rng_niq_size_restrict$log_likes) + 
-    length(state_rng_niq_size_restrict_xtra$log_likes)
-  with(state_rng_niq_size_restrict, {
-    plot(1:length(log_likes), log_likes, xlim = c(1, n), 
-         ylim = range(state_rng_niq_size_restrict_xtra$log_likes, log_likes))  
-  })
-  with(state_rng_niq_size_restrict_xtra, {
-    points((n - length(log_likes) + 1L):n, log_likes, xlim = c(1, n), pch = 16)  
-  })
-})
-
-plot(state_rng_niq_size_restrict_xtra$log_likes)
-logLik(state_rng_size_unrestrict_large)
-
-#####
-# estimates
-state_rng_niq_size_restrict_xtra$EM_ests
-sqrt(diag(state_rng_niq_size_restrict_large$Q))
-cov2cor(state_rng_niq_size_restrict_large$Q)
-state_rng_niq_size_restrict_large$F
-
-# compare  with 
-sqrt(diag(state_rng_size_restrict_large$Q))
-cov2cor(state_rng_size_restrict_large$Q)
-state_rng_size_restrict_large$F
-
-get_plot_device(
-  pf_plot_effects(state_rng_niq_size_restrict_large, 
-                  ylabs = c("Intercept", get_label("rel_size"), 
-                            get_label("r_niq_nn"))), 
-  "rng-inter-smooth-state-w-niq-size-unrestrict", onefile = FALSE)
-
-compare_fix(state_rng_niq_size_restrict_large, "comp-fix-inter-niq-rel-size-unrestrict")
-
-plot_sp_w_c("sigma"   , state_rng_niq_size_restrict_large, xlab = get_label("sigma"))
-plot_sp_w_c("r_niq_nn", state_rng_niq_size_restrict_large, xlab = get_label("r_niq_nn"))
-
-#####
-# effective sample size and AIC
-plot_eff(state_rng_niq_size_restrict)
-plot_eff(state_rng_niq_size_restrict_xtra)
-plot_eff(state_rng_size_unrestrict_large)
-
-AIC(base_fit, duffie_09_xtra, state_rng_inter_large, 
-    state_rng_size_restrict_large, state_rng_size_unrestrict_large, 
-    state_rng_niq_size_restrict_large)
 ```
 
 </div>
@@ -1241,10 +1038,11 @@ local({
     attr(model.matrix(state_rng_inter_large$terms$fixed, dat), "assign") + 1L
   
   frm_ord <- # we will use this order
-    ~ wz(dtd) + wz(excess_ret) + log_market_ret + r1y + wz(r_wcapq_nn) + 
-    wz(r_oiadpq_nn) + wz(r_mv_ltq) + wz(r_niq_nn) + wz(r_ltq_nn) + 
-    wz(r_actq_lctq) + wz(sigma) + wz(rel_size) + sp_w_c(r_niq_nn, 4) + 
-    sp_w_c(sigma, 4, knots = .04) + wz(r_actq_lctq):wz(sigma)
+    ~ wz(actq_defl_log) + wz(r_wcapq_atq) + wz(r_oiadpq_atq) + 
+    wz(r_niq_atq) + wz(r_ltq_atq) + wz(r_actq_lctq) + wz(sigma) + 
+    wz(excess_ret) + wz(rel_size) + wz(dtd) + log_market_ret + 
+    r1y + sp_w_c(r_niq_atq, 3) + sp_w_c(sigma, 3) + wz(r_mv_ltq_log) + 
+    sp_w_c(r_mv_ltq_log, 3) + wz(r_actq_lctq):wz(sigma)
   o <- c("(Intercept)", attr(terms(model.frame(frm_ord, dat)), "term.labels"))
   stopifnot(setequal(o, labs))
   i_new <- match(o, labs)
@@ -1388,12 +1186,19 @@ get_plot_device({
     lty = c(3, 1, 2, 3, 3), col = "black", 
     type = "l", xlab = get_label("sigma"), ylab = "Log-hazard term")
   
-  x1 <- plot_sp_w_c("r_niq_nn", state_rng_size_restrict_large, vals_only = TRUE)
-  x2 <- plot_sp_w_c("r_niq_nn", state_rng_inter_large, vals_only = TRUE)
+  x1 <- plot_sp_w_c("r_niq_atq", state_rng_size_restrict_large, vals_only = TRUE)
+  x2 <- plot_sp_w_c("r_niq_atq", state_rng_inter_large, vals_only = TRUE)
   matplot(
     x1$x, cbind(x1$base, x1$rng, x2$rng, x1$base_lb, x1$base_ub), 
     lty = c(3, 1, 2, 3, 3), col = "black", 
-    type = "l", xlab = get_label("r_niq_nn"), ylab = "Log-hazard term")
+    type = "l", xlab = get_label("r_niq_atq"), ylab = "Log-hazard term")
+  
+  x1 <- plot_sp_w_c("r_mv_ltq_log", state_rng_size_restrict_large, vals_only = TRUE)
+  x2 <- plot_sp_w_c("r_mv_ltq_log", state_rng_inter_large, vals_only = TRUE)
+  matplot(
+    x1$x, cbind(x1$base, x1$rng, x2$rng, x1$base_lb, x1$base_ub), 
+    lty = c(3, 1, 2, 3, 3), col = "black", 
+    type = "l", xlab = get_label("r_mv_ltq_log"), ylab = "Log-hazard term")
 }, "splines-rng-monthly", onefile = FALSE)
 ```
 
@@ -1404,6 +1209,14 @@ get_plot_device({
 Define function to make in-sample simulation
 
 <div class="hideable">
+
+<!-- 
+  knitr::opts_knit$set(output.dir = ".")
+  knitr::load_cache(
+      "in_sample_sim", 
+      path = paste0(file.path("markdown", "cache", "rng-effects"), 
+                    .Platform$file.sep))
+-->
 
 ```{r in_sample_sim, cache=1}
 sim_func <- function(
@@ -1489,8 +1302,10 @@ sim_func <- function(
 # fit other models to compare with
 duf_fit <- glm(y ~ wz(dtd) + wz(excess_ret) + r1y + log_market_ret, 
                binomial("cloglog"), dat)
-stopifnot("year_dummy" %in% colnames(dat))
-rng_fix <- update(base_fit, . ~ . + wz(rel_size)*year_dummy)
+rng_fix <- update(
+  base_fit, 
+  . ~ . + 
+    (1 + wz(rel_size))*ns(tstart, intercept = FALSE, df = 5))
 
 dat$year  <- as.integer(format(make_ym_inv(dat$tstop), "%Y"))
 dt_sub <- subset(dat, year >= 2000L)
@@ -1589,7 +1404,7 @@ local({
   sapply(delta_ts, function(x) abline(v = x, lty = 2))
   
   set.seed(99969118)
-  ord <- sample(ord, 60L, replace = FALSE)
+  ord <- sample(ord, 10L, replace = FALSE)
   
   to_check <- out_size$pred[ord, ]
 
@@ -1620,17 +1435,45 @@ local({
 
 ## Out-of-sample
 
-Fit models out-of-sample
+Clean-up
+
+<div class="hideable">
+
+```{r pre_out_sample_clean_up}
+eval(local({
+  to_rm <- c("rng_fix", "rocs", "objs", ls(pattern = "state_rng_", pos = 1), 
+             ls(pattern = "duffie_09", pos = 1), "duf_fit")
+  cat("Removing:\n",  paste0(sQuote(to_rm), collapse = " "), "\n")
+  to_rm <- c(list(quote(rm)), as.list(to_rm))
+  as.call(to_rm)
+}))
+```
+
+</div>
+
+Fit models for out-of-sample test
 
 <div class="hideable">
 
 ```{r fit_out_of_sample}
-dat$d_yr <- format(make_ym_inv(dat$tstart), "%Y")
-dat$yr <- as.integer(dat$d_yr)
-yrs <- 1998:(max(dat$yr) - 1L)
+# make dummy with half year indicator
+dat$yh <- local({
+  start_date     <- make_ym_inv(dat$tstart)
+  y <- as.integer(format(start_date, "%Y"))
+  m <- as.integer(format(start_date, "%m"))
+  
+  yh <- paste0("Y", y, "H", ifelse(m < 7, 1L, 2L))
+  
+  # print examples
+  set.seed(11640787)
+  print(data.frame(start_date, yh)[sample.int(length(y), size = 30L), ])
+  
+  as.factor(yh)
+})
 
+# fit models
 ctrl_default_out_of_sample <- PF_control(
-  N_fw_n_bw = 2000L, N_smooth = 1000L, N_first = 2000L, n_max = 1000, 
+  N_fw_n_bw = 1000L, N_smooth = 1000L, N_first = 2000L, n_max = 1000, 
   n_threads = n_threads, nu = 8L, covar_fac = 1.2, ftol_rel = 1e-6,
   smoother = "Fearnhead_O_N", eps = 1e-4, averaging_start = 50L)
 
@@ -1645,8 +1488,18 @@ f1_prefix <- file.path(
   "markdown", "output", "outsample-state-rng-inter-monthly")
 f2_prefix <- file.path(
   "markdown", "output", "outsample-state-rng-size-inter-monthly")
-for(y_i in yrs){
-  dat_y <- subset(dat, yr <= y_i)
+
+to_fit <- local({
+  o <- sort(unique(dat$yh))
+  o[grepl("199[89]|200\\d|201[0-5]", as.character(o))]
+})
+to_fit
+
+for(i in seq_along(to_fit)){
+  y_i <- to_fit[i]
+  dat_y <- subset(dat, as.integer(yh) <= as.integer(y_i))
+  cat("Fitting models with these periods\n")
+  print(sort(unique(dat_y$yh)))
   
   #####
   # fit model with random intercept
@@ -1660,11 +1513,12 @@ for(y_i in yrs){
         model = "cloglog", by = 1L, max_T = max(dat_y$tstop), 
         id = dat_y$gvkey_unique, 
         
-        # start close to values from full period as of 2019/03/12
-        Q = diag(0.015, 1), Fmat = diag(0.85, 1), 
+        # start close to values from full period as of 2019/04/04
+        Q = diag(0.0101, 1), Fmat = diag(0.912, 1), 
         fixed_effects = c(
-          -11, -0.35, -0.51, -1.3, -1.7, 0.57, -0.81, 97, -1.8, -0.21, 
-          0.074, 0.82, 3.3, 0.98, -0.27, 0.53, -1, -2.1, -3.1, 15),
+          -10.5, 0.205, -0.981, -1.08, -2.02, 0.447, -0.845, 109, -1.73, 
+          -0.34, 0.138, 0.938, 5.6, -0.172, 0.648, -4.19, -1.61, -0.733, 
+          -1.84, 0.39, 16.1),
         
         type = "VAR", control = ctrl_default_out_of_sample, 
         trace = 1L)
@@ -1693,10 +1547,11 @@ for(y_i in yrs){
         K = matrix(1, 1, 1),
         
         # start close to values from full period as of 2019/03/12
-        theta = c(0.97, 0.97), phi = 5.1, psi = c(-1.4, -2.8), 
+        theta = c(0.971, 0.974), phi = 4.74, psi = c(-1.36, -2.82), 
         fixed_effects = c(
-          -11, -0.36, -0.53, -1.2, -1.6, 0.55, -0.79, 120, -1.7, -0.25, 
-          0.065, 0.85, -0.95, 0.94, -0.3, 0.51, -1, -2.7, -3.8, 14),
+          -10.8, 0.252, -1.1, -1.09, -1.93, 0.521, -0.813, 126, -1.67, 
+          -0.42, 0.106, 0.972, -0.381, -0.138, 0.63, -5.05, -1.92, -0.627, 
+          -1.75, 0.507, 15.2),
         
         type = "VAR", control = ctrl_default_out_of_sample, 
         trace = 1L)
@@ -1716,12 +1571,14 @@ Load and check result
 ```{r check_fit_out_of_sample}
 # find the files
 fs <- list.files(file.path("markdown", "output"), full.names = TRUE)
-inter_ms <- fs[grepl("outsample\\-state\\-rng\\-inter\\-monthly", fs)]
-size_inter_ms <- fs[grepl("outsample\\-state\\-rng\\-size\\-inter\\-monthly", fs)]
+inter_ms <- fs[
+  grepl("outsample\\-state\\-rng\\-inter\\-monthly\\-Y", fs)]
+size_inter_ms <- fs[
+  grepl("outsample\\-state\\-rng\\-size\\-inter\\-monthly\\-Y", fs)]
 
 # add the years
-names(inter_ms) <- gsub("(.+)(\\d{4})(\\.RDS)$", "\\2", inter_ms)
-names(size_inter_ms) <- gsub("(.+)(\\d{4})(\\.RDS)$", "\\2", size_inter_ms)
+names(inter_ms) <- gsub("(.+)(Y\\d{4}H\\d)(\\.RDS)$", "\\2", inter_ms)
+names(size_inter_ms) <- gsub("(.+)(Y\\d{4}H\\d)(\\.RDS)$", "\\2", size_inter_ms)
 
 # load the objects
 inter_ms <- lapply(inter_ms, readRDS)
@@ -1742,6 +1599,7 @@ sds <- apply(model.matrix(tail(inter_ms)[[1L]]$terms$fixed, dat), 2, sd)
 sds["(Intercept)"] <- NA
 round(x <- t(x * sds)           , 1)
 round(z <- t(t(x) - colMeans(x)), 1)
+par(mar = c(5, 4, 1, 1), mfcol = c(1, 1))
 matplot(z, type = "l", lty = 1)
 
 sqrt(sapply(inter_ms, "[[", "Q"))
@@ -1773,15 +1631,20 @@ local({
   min_yr <- as.integer(format(make_ym_inv(min_x), "%Y"))
   x_lim  <- range(make_ym_inv(dat$tstart))
   
-  for(o in as.integer(names(inter_ms))){
-    x <- make_ym_inv(min_x:((o - min_yr) * 12L + min_x + 11L))
+  get_x_max <- function(x)
+    with(dat, max(tstart[yh == o]))
+  
+  for(o in names(inter_ms)){
+    max_x <- get_x_max(o)
+    x <- make_ym_inv(min_x:max_x)
     pf_plot_effects(
       inter_ms[[as.character(o)]], x = x, ylabs = "Intercept", 
       xlim = x_lim, change_par = FALSE)
   }
   
-  for(o in as.integer(names(size_inter_ms))){
-    x <- make_ym_inv(min_x:((o - min_yr) * 12L + min_x + 11L))
+  for(o in names(size_inter_ms)){
+    max_x <- get_x_max(o)
+    x <- make_ym_inv(min_x:max_x)
     pf_plot_effects(
       size_inter_ms[[as.character(o)]], x = x, xlim = x_lim,
       ylabs = c("Intercept", get_label("rel_size")), change_par = FALSE)
@@ -1818,8 +1681,8 @@ Forecast outcomes with models with frailty
 ```{r forecast, cache = 1}
 # assign function to perform the simulation
 forecast_func <- function(
-  fit, y_i, n_outer = 10000L, n_inner = 10L, cl, idvar = gvkey, tvar = tstop){
-  stopifnot(is.integer(y_i), is.integer(n_outer), is.integer(n_inner), 
+  fit, yh_i, n_outer = 10000L, n_inner = 10L, cl, idvar = gvkey, tvar = tstop){
+  stopifnot(is.factor(y_i), is.integer(n_outer), is.integer(n_inner), 
             n_outer > 0L, n_inner > 0L, inherits(fit, c("PF_EM", "glm")))
   
   is_glm <- inherits(fit, "glm")
@@ -1828,10 +1691,10 @@ forecast_func <- function(
       fit$family$family == "binomial", fit$family$link == "cloglog") else
       stopifnot(fit$call$model == "cloglog")
   
-  # get data. `y_i` is the year up to which we use to estimate the model 
+  # get data. `yh_i` is the period up to which we use to estimate the model 
   # so we increament by one
-  y_i <- y_i + 1L
-  dat_y <- subset(dat, yr == y_i)
+  yh_i <- as.integer(yh_i) + 1L
+  dat_y <- subset(dat, as.integer(yh) == yh_i)
   
   # get id and time variable
   id <- eval(substitute(idvar), dat_y)
@@ -1940,10 +1803,11 @@ clusterSetRNGStream(cl)
 
 inter_ms_forceast <- mapply(
   forecast_func, fit = inter_ms, SIMPLIFY = FALSE, MoreArgs = list(cl = cl),
-  y_i = as.integer(names(inter_ms)))
+  yh_i = factor(names(inter_ms), levels = levels(dat$yh)))
 size_inter_ms_forceast <- mapply(
   forecast_func, fit = size_inter_ms, SIMPLIFY = FALSE, 
-  MoreArgs = list(cl = cl), y_i = as.integer(names(size_inter_ms)))
+  MoreArgs = list(cl = cl), 
+  yh_i = factor(names(inter_ms), levels = levels(dat$yh)))
 
 stopCluster(cl)
 ```
@@ -1966,20 +1830,24 @@ Do the same for models without frailty
 # define function to fit models and use previous defined function to simulate
 # the predicted default rate and more
 out_sample_glm <- function(frm, cl, n_outer = 10000L, n_inner = 10L){
-  yrs <- 1998:(max(dat$yr) - 1L)
+  to_fit <- local({
+    o <- sort(unique(dat$yh))
+    o[grepl("199[89]|200\\d|201[0-5]", as.character(o))]
+  })
   
-  out <- lapply(yrs, function(y_i){
+  out <- lapply(to_fit, function(yh_i){
     # fit model
     fit <- glm(
-      frm, family = binomial("cloglog"), data = subset(dat, yr <= y_i))
+      frm, family = binomial("cloglog"), 
+      data = subset(dat, as.integer(yh) <= as.integer(yh_i)))
     
     # forecast
     out <- forecast_func(
-      fit = fit, y_i = y_i, n_outer = n_outer, n_inner = n_inner, cl = cl)
+      fit = fit, yh_i = yh_i, n_outer = n_outer, n_inner = n_inner, cl = cl)
     c(out, list(coef = coef(fit)))
   })
   
-  names(out) <- yrs
+  names(out) <- as.character(to_fit)
   out
 }
 
@@ -2022,10 +1890,13 @@ objs <- list(
 stopifnot(all(sapply(objs[-1L], length) == length(objs[[1L]])), 
           all(sapply(objs[-1L], names) == names(objs[[1L]])))
 
-yrs <- as.integer(names(objs[[1L]])) + 1L
-forecast_summary <- lapply(seq_along(yrs), function(i){ 
+fitted_lvls <- local({
+  fs <- names(objs[[1L]])
+  unique(dat$yh[dat$yh %in% fs])
+})
+forecast_summary <- lapply(seq_along(fitted_lvls), function(i){
   # check that indices match
-  y_i <- yrs[i]
+  yh_i <- fitted_lvls[i]
   objs_i <- lapply(objs, "[[", i)
   indices <- lapply(objs_i, "[[", "id_out")
   stopifnot(all(
@@ -2034,7 +1905,12 @@ forecast_summary <- lapply(seq_along(yrs), function(i){
   # compute AUCs
   y_realized <- objs_i[[1L]]$event_count > 0L
   library(pROC)
-  aucs <- sapply(objs_i, function(x) c(auc(y_realized, x$phat)))
+  aucs <- if(!any(y_realized) || !any(!y_realized)){
+    cat("Cannot compute auc for", sQuote(yh_i), "\n")
+    aucs <- rep(NA_real_, length(objs_i))
+    
+  } else 
+    sapply(objs_i, function(x) c(auc(y_realized, x$phat)))
   
   # computed predicted industry default rate quantiles
   default_rate_dist <- sapply(objs_i, function(x) 
@@ -2044,54 +1920,79 @@ forecast_summary <- lapply(seq_along(yrs), function(i){
   realized_default_rate <- mean(y_realized)
   
   list(aucs = aucs, default_rate_dist = default_rate_dist, 
-       realized_default_rate = realized_default_rate, y_i = y_i)
+       realized_default_rate = realized_default_rate, yh_i = yh_i)
 })
 
 #####
 # plot of default rate distributions
-xs <- sapply(forecast_summary, "[[", "y_i") + 1L +
-  (month(make_ym_inv(min(dat$tstart))) - 1L) / 12
+xs <- local({
+  out <- as.character(sapply(forecast_summary, "[[", "yh_i"))
+  y <- as.integer(gsub("^(Y)(\\d{4})(.+)", "\\2", out, perl = TRUE))
+  H <- as.integer(gsub("^(.+H)(\\d)$", "\\2", out, perl = TRUE))
+  y + H / 2 # note that we add an extra half-year as this is period start 
+            # of the forecast
+})
 realized_default_rate <- 
   sapply(forecast_summary, "[[", "realized_default_rate")
 qs <- lapply(forecast_summary, "[[", "default_rate_dist")
 
 n_models <- ncol(qs[[1L]])
-xs_i <- outer(seq(-.2, .2, length.out = n_models), xs, "+")
+xs_i <- outer(seq(-.1, .1, length.out = n_models), xs, "+")
 
 get_plot_device({
-  par(mar = c(5, 4, .5, .5))
+  par(mar = c(4, 3, .5, .5), mfcol = c(1, 1), xpd = TRUE, mgp = c(2, 1, 0))
+  ylim <- range(unlist(qs), realized_default_rate)
+  ylim[2] <- ylim[2] + .04 * diff(ylim)
   plot(
-    xs, realized_default_rate, ylim = range(unlist(qs), realized_default_rate), 
-    xlab = "(Year - 1, Year]", ylab = "Default rate", pch = 4, 
-    xlim = range(xs_i))
+    xs, realized_default_rate, ylim = ylim, type = "n",
+    xlab = "(t - 1/2, t]", ylab = "Default rate", xlim = range(xs_i), yaxs= "i", 
+    cex = .7, cex.lab = .8,cex.axis = .8)
   
   pch <- c(5, 6, 17, 18)
   for(i in seq_along(qs)){
     xs_i_j <- xs_i[, i]
     qs_j <- qs[[i]]
-    
+
+    # add prediction intervals    
     arrows(xs_i_j, qs_j[1, ], xs_i_j, qs_j[3, ], length = 0.05, angle = 90, 
-           code = 3, col = "DarkGray")
-    points(xs_i_j, qs_j[2, ], pch = pch)
+       code = 0, col = "DarkGray", cex = .7)
+    points(xs_i_j, qs_j[1, ], pch = pch, cex = .33)
+    points(xs_i_j, qs_j[3, ], pch = pch, cex = .33)
+    
+    # add medians
+    points(xs_i_j, qs_j[2, ], pch = pch, cex = .7)
+    
+    # add realized 
+    points(xs, realized_default_rate, pch = 8, col = rgb(0,0,0,.1))
   }
   
   nber_poly()
-}, "default-rate-out-sample-monthly")
+}, "default-rate-out-sample-monthly", set_par = FALSE)
 
 #####
 # AUC
 out_auc <- sapply(forecast_summary, "[[","aucs")
-xs_i <- outer(seq(-.2, .2, length.out = n_models), xs, "+")
+xs_i <- outer(seq(-.1, .1, length.out = n_models), xs, "+")
 
-func <- function(y, ylab){
-  plot(xs_i, y, type = "n", ylim = range(y, 1), ylab = "AUC", 
-       xlab = "(Year - 1, Year]")
+func <- function(y, xs){
+  plot(xs_i, y, type = "n", ylim = range(y, 1, na.rm = TRUE), ylab = "AUC", 
+       xlab = "(t - 1/2, t]")
+  for(j in 1:ncol(xs_i)){
+    # make largest AUC black, lowest with dark blue and the rest dark gray
+    xs_i_j <- xs_i[, j]
+    y_j <- y[, j]
+    col <- ifelse(1:nrow(xs_i) == which.max(y_j), "Black", "DarkGray")
+    col[which.min(y_j)] <- "DarkBlue"
+    
+    points(xs_i_j, y_j, col = col, pch = pch)
+  }
   for(i in 1:n_models)
-    points(xs_i[i, ], y[i, ], pch = pch[i])
+    
+  abline(v = head(xs, -1) + .5 * diff(xs), lty = 3, xpd = FALSE)
   nber_poly()
 }
 
-get_plot_device(func(out_auc), "auc-out-sample-monthly")
+get_plot_device(func(out_auc, xs), "auc-out-sample-monthly")
 ```
 
 </div>

@@ -60,7 +60,7 @@ knitr::opts_chunk$set(
 options(digits = 4, scipen = 10, width = 90)
 ```
 
-```{r child = 'setup.Rmd'}
+```{r run_setup, child = 'setup.Rmd'}
 ```
 
 Fit models with only linear association on the linear predictor scale
