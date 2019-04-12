@@ -209,28 +209,45 @@ a GAM to see association.
 ```{r check_actq_defl_log_effect, cache = 1}
 library(mgcv)
 library(parallel)
-library(RColorBrewer)
-(function(){
-  cl <- makeCluster(6L)
-  on.exit(stopCluster(cl))
-  dat_use <- with(
-    dat, data.frame(
-      y, rel_size = unclass(wz(rel_size, do_center = FALSE)), 
-      actq_defl_log = unclass(wz(actq_defl_log, do_center = FALSE))))
-  fit <- bam(y ~ te(rel_size, actq_defl_log, k = c(15, 15), bs = "cs"), 
-             binomial("cloglog"), dat_use, cluster = cl)
-  print(summary(fit))
-  for(i in 0:3)
-    vis.gam(fit, c("rel_size", "actq_defl_log"), theta=-35 + 90 * i, 
-            ticktype = "detailed", color = "gray")
+local({
+  make_plot_func <- (function(){
+    cl <- makeCluster(5L)
+    on.exit(stopCluster(cl))
+    dat_use <- with(
+      dat, data.frame(
+        y, rel_size = unclass(wz(rel_size, do_center = FALSE)), 
+        actq_defl_log = unclass(wz(actq_defl_log, do_center = FALSE))))
+    fit <- bam(y ~ te(rel_size, actq_defl_log, k = c(15, 15), bs = "cs"), 
+               binomial("cloglog"), dat_use, cluster = cl)
+    print(summary(fit))
+    
+    library(MASS)
+    dens <- kde2d(dat_use$rel_size, dat_use$actq_defl_log, n = 100)
+    
+    function(){
+      for(i in 0:3)
+        vis.gam(fit, c("rel_size", "actq_defl_log"), theta= 20 + 90 * i, 
+                ticktype = "detailed", color = "gray", 
+                zlab = "\nLog hazard", 
+                xlab = paste0("\n", get_label("rel_size")), 
+                ylab = paste0("\n", get_label("actq_defl_log")))
+      
+      # show kernel density plot to strees that there is mainly data in some 
+      # regions
+      library(lattice)
+      cols <- colorRampPalette(gray.colors(7, start = .9, end = 0))(40)
+      print(levelplot(
+        dens$z, row.values = dens$x, column.values = dens$y, 
+        col.regions = cols, xlab = get_label("rel_size"), 
+        ylab = get_label("actq_defl_log"), 
+        scales = list(tck = c(1,0)), 
+        xlim = range(dens$x), ylim = range(dens$y)))
+    }
+  })()
   
-  # show kernel density plot to strees that there is mainly data in some 
-  # regions
-  library(MASS)
-  dens <- kde2d(dat_use$rel_size, dat_use$actq_defl_log, n = 100) 
-  image(dens, col = colorRampPalette(brewer.pal(7, "Blues"))(30), 
-        xlab = "rel_size", ylab = "actq_defl_log")
-})()
+  get_plot_device(make_plot_func(), "marginal-rel_size-actq_defl_log", 
+                  onefile = FALSE)
+})
 ```
 
 
@@ -456,7 +473,7 @@ summary(i2)
 AIC(s0, i1, i2)
 anova(s0, i1, i2, test = "LRT")
 
-i3 <- update(i2, . ~ . + wz(r_actq_lctq) : wz(sigma)) 
+i3 <- update(i2, . ~ . + wz(r_actq_lctq) : wz(sigma))
 summary(i3)
 AIC(s0, i1, i2, i3)
 anova(s0, i1, i2, i3, test = "LRT")
@@ -473,7 +490,7 @@ get_plot_device({
   plot_sp_w_c(i0, "r_mv_ltq_log", ylab = "Log-hazard term")()
 }, "spline_plots_w_interact", onefile = FALSE)
 
-rm(i1, i2, i3)
+rm(i1, i2, i3) 
 ```
 
 ```{r redo_check_interact, cache = 1, dependson = c("add_inter", "check_interact"), fig.height = 8, fig.width = 8}
@@ -898,13 +915,13 @@ make_sims_plot <- function(sims, dat, ylim = NA){
 }
 
 get_plot_device(
-  make_sims_plot(i0_sims, dat, c(0, .011)), 
+  make_sims_plot(i0_sims, dat, c(0, .014)), 
   "glm-spline-agg-in-sample", onefile = FALSE)
 get_plot_device(
-  make_sims_plot(f0_sims , dat, c(0, .011)), 
+  make_sims_plot(f0_sims , dat, c(0, .014)), 
   "glm-no-spline-agg-in-sample", onefile = FALSE)
 get_plot_device(
-  make_sims_plot(duf_sims, dat, c(0, .011)), 
+  make_sims_plot(duf_sims, dat, c(0, .014)), 
   "glm-duf-agg-in-sample", onefile = FALSE)
 ```
 

@@ -1038,17 +1038,22 @@ local({
     attr(model.matrix(state_rng_inter_large$terms$fixed, dat), "assign") + 1L
   
   frm_ord <- # we will use this order
-    ~ wz(actq_defl_log) + wz(r_wcapq_atq) + wz(r_oiadpq_atq) + 
-    wz(r_niq_atq) + wz(r_ltq_atq) + wz(r_actq_lctq) + wz(sigma) + 
-    wz(excess_ret) + wz(rel_size) + wz(dtd) + log_market_ret + 
-    r1y + sp_w_c(r_niq_atq, 3) + sp_w_c(sigma, 3) + wz(r_mv_ltq_log) + 
+    ~ wz(dtd) + wz(excess_ret) + r1y + log_market_ret + 
+    wz(actq_defl_log) + wz(r_wcapq_atq) + wz(r_oiadpq_atq) + 
+    wz(r_mv_ltq_log) + wz(r_niq_atq) + wz(r_ltq_atq) + wz(r_actq_lctq) + 
+    wz(r_actq_lctq) + wz(sigma) + wz(rel_size) + 
+    sp_w_c(r_niq_atq, 3) + sp_w_c(sigma, 3) + 
     sp_w_c(r_mv_ltq_log, 3) + wz(r_actq_lctq):wz(sigma)
   o <- c("(Intercept)", attr(terms(model.frame(frm_ord, dat)), "term.labels"))
   stopifnot(setequal(o, labs))
+  
+  df <- unlist(sapply(assg, function(x) sum(assg == x)))
+  
   i_new <- match(o, labs)
   i_new <- unlist(sapply(i_new, function(x) which(assg == x)))
   betas <- betas[i_new, ]
   assg <- assg[i_new]
+  df <- df[i_new]
   vcovs <- lapply(vcovs, "[", i = i_new, j = i_new)
   labs <- o
   
@@ -1070,10 +1075,11 @@ local({
   
   do_drop <- duplicated(assg)
   betas <- betas[!do_drop, ]
+  df <- df[!do_drop]
   rownames(betas) <- labs
   
   # blank those out with more than one term
-  betas[table(assg) > 1L, ] <- NA_real_
+  betas[df > 1L, ] <- NA_real_
   
   theta <- matrix(NA_real_, 2, 2)
   theta[1, 1] <- state_rng_inter_large$F
@@ -1939,8 +1945,11 @@ qs <- lapply(forecast_summary, "[[", "default_rate_dist")
 n_models <- ncol(qs[[1L]])
 xs_i <- outer(seq(-.1, .1, length.out = n_models), xs, "+")
 
+pa_func <- function()
+  par(mar = c(4, 3, .5, .5), mfcol = c(1, 1), xpd = TRUE, mgp = c(2, 1, 0), 
+      cex.lab = .8, cex.axis = .8)
 get_plot_device({
-  par(mar = c(4, 3, .5, .5), mfcol = c(1, 1), xpd = TRUE, mgp = c(2, 1, 0))
+  pa_func()
   ylim <- range(unlist(qs), realized_default_rate)
   ylim[2] <- ylim[2] + .04 * diff(ylim)
   plot(
@@ -1963,11 +1972,53 @@ get_plot_device({
     points(xs_i_j, qs_j[2, ], pch = pch, cex = .7)
     
     # add realized 
-    points(xs, realized_default_rate, pch = 8, col = rgb(0,0,0,.1))
+    points(xs, realized_default_rate, pch = 1, col = rgb(0, 0, 0, alpha = .5), 
+           cex = .9)
   }
   
   nber_poly()
 }, "default-rate-out-sample-monthly", set_par = FALSE)
+
+# compute number of breaches 
+local({
+  #####
+  # compute figures 
+  upper_bounds <- t(sapply(qs, "[", i = 3, j = TRUE))
+  breaches <- realized_default_rate >  upper_bounds
+  cat("Breaches (>)\n")
+  print(n_ge <- colSums(breaches))
+  print(colMeans(breaches))
+  
+  breaches <- realized_default_rate >= upper_bounds
+  cat("Breaches (>=)\n")
+  print(n_geq <- colSums(breaches))
+  print(colMeans(breaches))
+  
+  lvls <- as.character(sapply(forecast_summary, "[[", "yh_i"))
+  lvls <- as.integer(unique(dat$yh[dat$yh %in% lvls]))  + 1L
+  lvl_dat <- subset(dat, (as.integer(yh) + 1L) %in% lvls)
+  cat("Number of firms and events\n")
+  n_obs   <- tapply(
+    lvl_dat$mast_issr_num, droplevels(lvl_dat$yh), 
+    function(x) length(unique(x)))
+  n_events <- tapply(lvl_dat$y, droplevels(lvl_dat$yh), sum)
+  
+  print(rbind(n_obs = n_obs, n_events = n_events))
+  
+  #####
+  # make table
+  nl <- "\\\\\n"
+  cat(
+    "\\begin{tabular}{lrrrr}\\toprule\n", 
+    "&", paste0("\\monthM{", c(1, 3:5), "}", collapse = "& "), nl,
+    "\\midrule\n",
+    "\\# breaches ($>$) &" , paste0(n_ge , collapse = " & ") , nl,
+    "\\# breaches ($\\geq$) &", paste0(n_geq, collapse = " & "), nl,
+    "\\# periods &", paste0(rep(length(n_obs), 4), collapse = " & "), nl,
+    "\\bottomrule\n",
+    "\\end{tabular}",
+    sep = "")
+})
 
 #####
 # AUC
@@ -1975,6 +2026,7 @@ out_auc <- sapply(forecast_summary, "[[","aucs")
 xs_i <- outer(seq(-.1, .1, length.out = n_models), xs, "+")
 
 func <- function(y, xs){
+  pa_func()
   plot(xs_i, y, type = "n", ylim = range(y, 1, na.rm = TRUE), ylab = "AUC", 
        xlab = "(t - 1/2, t]")
   for(j in 1:ncol(xs_i)){
@@ -1993,6 +2045,9 @@ func <- function(y, xs){
 }
 
 get_plot_device(func(out_auc, xs), "auc-out-sample-monthly")
+
+# stats on AUC rankings
+table(unlist(apply(out_auc, 2L, which.max)))
 ```
 
 </div>
