@@ -1688,7 +1688,7 @@ Forecast outcomes with models with frailty
 # assign function to perform the simulation
 forecast_func <- function(
   fit, yh_i, n_outer = 10000L, n_inner = 10L, cl, idvar = gvkey, tvar = tstop){
-  stopifnot(is.factor(y_i), is.integer(n_outer), is.integer(n_inner), 
+  stopifnot(is.factor(yh_i), is.integer(n_outer), is.integer(n_inner), 
             n_outer > 0L, n_inner > 0L, inherits(fit, c("PF_EM", "glm")))
   
   is_glm <- inherits(fit, "glm")
@@ -1714,10 +1714,12 @@ forecast_func <- function(
   stopifnot(all(diff(ti_unique) == 1L))
   
   # get design matrices
+  n_periods <- tapply(id, id, length)
   if(is_glm){
     phat <- predict(fit, dat_y, type = "response")
     clusterExport(
-      cl, c("phat", "id", "ti", "ti_unique", "n_inner", "is_glm"), 
+      cl, c("phat", "id", "ti", "ti_unique", "n_inner", "is_glm", 
+            "n_periods"), 
       environment())
     
   } else {
@@ -1729,7 +1731,7 @@ forecast_func <- function(
   
     clusterExport(
       cl, c("eta", "Z", "cloud", "F.", "Q_chol", "id", "ti", "ti_unique", 
-            "n_inner"), environment())
+            "n_inner", "n_periods"), environment())
     
   }
   
@@ -1772,14 +1774,22 @@ forecast_func <- function(
     Y <- replicate(n_inner, phat > runif(length(phat)))
     Y_bar <- colMeans(Y)
     
-    list(phat = if(is_glm) NULL else phat, id_out = id_out, Y_bar = Y_bar)
+    # given phat we compute a constant monthly hazard over the period. This we 
+    # can be used e.g., AUC computation so that we account for the length that 
+    # we observe each firm
+    haz <- log1p(-phat) / n_periods
+    
+    list(haz = if(is_glm) NULL else haz, id_out = id_out, Y_bar = Y_bar)
   })
   
   # gather default rates for individuals, compute the means, and gather the 
   # industry wide default rates
-  phat <- if(!is_glm)
-    rowMeans(sapply(out, "[[", "phat")) else 
-      tapply(phat, id, Reduce, f = function(x, y) x + (1 - x) * y, init = 0.)
+  haz <- if(!is_glm)
+    rowMeans(sapply(out, "[[", "haz")) 
+  else {
+    phat <- tapply(phat, id, Reduce, f = function(x, y) x + (1 - x) * y, init = 0.)
+    log1p(-phat) / n_periods
+  }
   id_out <- out[[1L]]$id_out
   Y_bar <- c(sapply(out, "[[", "Y_bar"))
   
@@ -1798,7 +1808,7 @@ forecast_func <- function(
     mean(unlist(cum_event_count)) * 100, sum(event_count > 1L)))
   
   list(
-    Y_bar = Y_bar, phat = phat, id_out = id_out, event_count = event_count)
+    Y_bar = Y_bar, haz = haz, id_out = id_out, event_count = event_count)
 }
 
 # use function
@@ -1860,7 +1870,7 @@ out_sample_glm <- function(frm, cl, n_outer = 10000L, n_inner = 10L){
 # use function
 library(parallel)
 cl <- makeCluster(6L)
-set.seed(64010384)
+set.seed(64010384) 
 clusterSetRNGStream(cl)
 
 frm_simple <- y ~ wz(dtd) +  wz(excess_ret) + log_market_ret + r1y
@@ -1916,7 +1926,7 @@ forecast_summary <- lapply(seq_along(fitted_lvls), function(i){
     aucs <- rep(NA_real_, length(objs_i))
     
   } else 
-    sapply(objs_i, function(x) c(auc(y_realized, x$phat)))
+    sapply(objs_i, function(x) c(auc(y_realized, x$haz)))
   
   # computed predicted industry default rate quantiles
   default_rate_dist <- sapply(objs_i, function(x) 
