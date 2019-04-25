@@ -222,9 +222,12 @@ local({
     print(summary(fit))
     
     library(MASS)
-    dens <- kde2d(dat_use$rel_size, dat_use$actq_defl_log, n = 100)
+    dens_N <- 50L
+    dens <- kde2d(dat_use$rel_size, dat_use$actq_defl_log, n = dens_N)
+    dens_small <- kde2d(dat_use$rel_size, dat_use$actq_defl_log, n = dens_N - 1L)
     
     function(){
+      # first we make the plot using mgcv
       for(i in 0:3)
         vis.gam(fit, c("rel_size", "actq_defl_log"), theta= 20 + 90 * i, 
                 ticktype = "detailed", color = "gray", 
@@ -236,12 +239,46 @@ local({
       # regions
       library(lattice)
       cols <- colorRampPalette(gray.colors(7, start = .9, end = 0))(40)
-      print(levelplot(
+      print(lvl <- levelplot(
         dens$z, row.values = dens$x, column.values = dens$y, 
         col.regions = cols, xlab = get_label("rel_size"), 
         ylab = get_label("actq_defl_log"), 
         scales = list(tck = c(1,0)), 
         xlim = range(dens$x), ylim = range(dens$y)))
+      
+      # then we make a similar 3D plot where we focus on the high density areas
+      keep <- dens$z > (max(dens$z) / 66)
+      cat(sprintf(
+        "%.2f pct. of density is included and %.2f of the squares\n", 
+        100 * sum(dens$z[keep]) / sum(dens$z), 100 * mean(keep)))
+      image(keep, x = dens$x, y = dens$y)
+      
+      dat_plot <- expand.grid(rel_size = dens$x, actq_defl_log = dens$y)
+      dat_plot <- within(dat_plot, {
+        z_plot <- z <- predict(fit, dat_plot, type = "link")
+        keep <- c(keep)
+        dens = c(dens$z)
+        z_plot[!keep] <- NA_real_
+      })
+      
+      # plot subset where we have data
+      for(i in 0:3)
+        with(dat_plot, {
+          x_vals <- unique(rel_size)
+          y_vals <- unique(actq_defl_log)
+          z_vals <- matrix(z_plot, length(x_vals), length(y_vals))
+          
+          cols <- dens_small$z
+          cols <- level.colors(
+            cols, pretty(cols), lvl$panel.args.common$col.regions)
+          
+          persp(
+            x = unique(rel_size), y = unique(actq_defl_log), z = z_vals, 
+            ticktype = "detailed", theta= 20 + 90 * i, col = cols, 
+            zlab = "\nLog hazard", 
+            xlab = paste0("\n", get_label("rel_size")), 
+            ylab = paste0("\n", get_label("actq_defl_log")))
+        })
     }
   })()
   
