@@ -10,7 +10,8 @@ in this project
  
 Each file, as of this writing, starts by printing the branch and commit id 
 from [github.com/boennecd/US_PD_data](https://github.com/boennecd/US_PD_data). 
-This repository is used to create the data set that is being used. 
+This repository is used to create the data set that is being used. The annual models 
+are from an earlier analysis and are not up-to-date.
 
 Knit the documents at the project root. You can change this in Rstudio in the "Knit" 
 drop down menu. We use [packrat](https://rstudio.github.io/packrat/) to ensure 
