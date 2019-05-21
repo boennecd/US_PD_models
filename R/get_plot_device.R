@@ -2,17 +2,36 @@ palette(c(
   "#000000", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", 
   "#CC79A7"))
 
+.fig_dir <- file.path("markdown", "fig")
+
+.get_plot_device_ggplot <- function(expr, file_name_wo_extension){
+  x <- eval(expr, parent.frame(2L))
+  print(x)
+  
+  pref <- file.path(.fig_dir, file_name_wo_extension)
+  ggsave(paste0(pref, ".pdf"), width = 6, height = 3.75)
+  ggsave(paste0(pref, "-half.pdf"), width = 4, height = 3.75)
+  ggsave(paste0(pref, ".png"), width = 6, height = 3.75)
+  
+  invisible(NULL)
+}
+
 get_plot_device <-  function(
-  expr, file_name_wo_extension, onefile = TRUE, set_par = TRUE)
+  expr, file_name_wo_extension, onefile = TRUE, set_par = TRUE, 
+  ggplot = FALSE)
   {
+    if(ggplot)
+      return(.get_plot_device_ggplot(
+        substitute(expr), file_name_wo_extension))
+  
     if(!onefile)
       file_name_wo_extension <- paste0(file_name_wo_extension, "_%03d")
     pdf. <- file.path(
-      "markdown", "fig", paste0(file_name_wo_extension, ".pdf"))
+      .fig_dir, paste0(file_name_wo_extension, ".pdf"))
     pdf_half <- file.path(
-      "markdown", "fig", paste0(file_name_wo_extension, "-half.pdf"))
+      .fig_dir, paste0(file_name_wo_extension, "-half.pdf"))
     jpeg. <- file.path(
-      "markdown", "fig", paste0(file_name_wo_extension, ".jpg"))
+      .fig_dir, paste0(file_name_wo_extension, ".jpg"))
     
     # make the plot 
     if(set_par){

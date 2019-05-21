@@ -1,0 +1,204 @@
+---
+title: "Aggregation Example"
+author: 
+  - Rastin Matin
+  - Benjamin Christoffersen 
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:  
+  html_document:
+    toc: true
+bibliography: refs.bib
+---
+
+<script>
+$(document).ready(function(){
+  var hide_divs = $("div.hideable");
+  hide_divs.each(function(){
+    // Wrap content in div
+    $(this).wrapInner( "<div class='hideable_content', style='display: none;'></div>");
+    
+    // Add button
+    $(this).prepend("<button id='toogle'>show</button>");
+  });
+  
+  // Add hideable btn
+  // Put the rest in a div
+  
+  $("div.hideable button#toogle").click(function(){
+    var parent = $(this).parent();
+    var target_div = $(parent).find("div.hideable_content");
+    
+    if(target_div.css("display") == "none"){
+      target_div.show();
+        $(this).text("Hide");
+    } else {
+      target_div.hide();
+      $(this).text("Show");
+    }
+  });
+});
+</script>
+
+## Load data
+
+```{r static_setup, include=FALSE, cache=FALSE}
+# please do not set options here that could change...
+knitr::opts_chunk$set(
+  cache.path = 
+    paste0(file.path("cache", "aggregation-example"), .Platform$file.sep), 
+  fig.path = 
+    paste0(file.path("fig"  , "aggregation-example"), .Platform$file.sep))
+```
+
+```{r setup, include=FALSE, cache=FALSE}
+# please do set options here that could change...
+knitr::opts_chunk$set(
+  echo = TRUE, fig.height = 4, fig.width = 7, dpi = 72, comment = "#R", 
+  error = FALSE)
+options(digits = 4, scipen = 10, width = 90)
+```
+
+```{r run_setup, child = 'setup.Rmd'}
+```
+
+## Show Densities Through Time
+
+```{r load_gg}
+library(ggridges)
+library(ggplot2)
+library(parallel)
+```
+
+```{r sigma_do_dens, cache = 1}
+local({
+  dat$time_var <- format(make_ym_inv(dat$tstop), "%Y")
+  dat$siga <- c(wz(dat$sigma, do_center = FALSE, scale = FALSE))
+  
+  get_plot_device({
+    ggplot(subset(dat, as.integer(time_var) > 1998L), 
+           aes(x = siga, y = time_var)) + 
+      stat_density_ridges(scale = 3, fill = rgb(0, 0, 0, 0), quantile_lines = TRUE, 
+                          quantiles = 2) + theme_ridges() +
+      scale_x_continuous(expand = c(0.01, 0)) +
+      scale_y_discrete(expand = c(0.01, 0)) + 
+      labs(x = get_label("sigma"), y = "Year (t - 1, t]")
+  }, file_name_wo_extension = "agg-sigma-time-dens", ggplot = TRUE)
+})
+```
+
+## Example in Paper
+
+```{r def_sim_func}
+#####
+# assign function to simulate outcome
+n_periods <- 64L + 1L
+
+# means for mixture component with time-varying means
+mea_min <- -3
+mea_max <- 2
+mid <- (n_periods - 1L) / 2L 
+tfunc <- abs(1:n_periods - mid - 1L)
+tfunc <- (tfunc - min(tfunc)) / (max(tfunc) - min(tfunc)) * 
+  (mea_max - mea_min) + mea_min
+plot(tfunc, type = "l")
+
+# assign simulation function
+get_dat <- function(){
+  sim_dat <- replicate(1000, {
+    # draw starting time
+    tstart <- (sample.int(n_periods, 1L) - 1L):(n_periods - 1L)
+    
+    # draw covariates
+    n <- length(tstart)
+    X <- ifelse(
+      .2 > runif(n), 
+      rnorm(n * 1L, mean = tfunc[tstart + 1L], sd = .5), 
+      rnorm(n * 1L))
+    
+    # determine if individual has an event and remove observations after
+    # if so
+    y <- -expm1(-exp(X - 3)) > runif(n) 
+    idx <- if(any(y)) 1:min(which(y)) else 1:n
+    
+    # return 
+    data.frame(X, y = y, tstop = tstart + 1L, tstart = tstart)[idx, ]
+  }, simplify = FALSE)
+  do.call(rbind, sim_dat)
+}
+
+# show example
+set.seed(18404064)
+tmp <- get_dat()
+ggplot(tmp, aes(x = X, y = as.factor(tstop))) + 
+  stat_density_ridges(scale = 3, fill = rgb(0, 0, 0, 0), quantile_lines = TRUE, 
+                      quantiles = 2) + theme_ridges() +
+  scale_x_continuous(expand = c(0.01, 0)) +
+  scale_y_discrete(expand = c(0.01, 0)) + labs(y = "tstop")
+```
+
+```{r run_sim, cache = 1}
+######
+# simulate
+
+# knot positions
+(knt <- seq(1, n_periods, length.out = 5L)[-c(1, 5)])
+
+# simulate and compute
+cl <- makeCluster(6L)
+set.seed(28789699)
+clusterExport(cl, c("knt", "n_periods", "n_periods", "get_dat", "tfunc"), 
+              envir = environment())
+clusterSetRNGStream(cl)
+
+out <- parLapply(cl, 1:1000L, function(...){
+  library(splines)
+  
+  # simulate data and fit true model
+  sim_dat <- get_dat()
+  f1 <- glm(y ~ X, binomial("cloglog"), sim_dat)
+  
+  # aggregate data 
+  sim_col <- lapply(split(sim_dat, sim_dat$tstop), function(x){
+    n <- nrow(x)
+    with(x, data.frame(n = n, y = sum(y) / n, X = mean(X), tstart = tstart[1L], 
+                       tstop = tstop[1L]))
+  })
+  sim_col <- do.call(rbind, sim_col)
+  
+  # fit models to aggregate data
+  f2 <- glm(y ~ X, binomial("cloglog"), sim_col, weights = n)
+  
+  # add splines
+  f3 <- update(f2, . ~ . + ns(tstop, knots = knt))
+  
+  list(f1 = f1, f2 = f2, f3 = f3)
+}, simplify = FALSE)
+
+stopCluster(cl)
+```
+
+```{r gather_res}
+#####
+# gather result
+ests <- local({
+  ests <- lapply(out, function(o) sapply(o, function(m) coef(m)))
+  out <- lapply(seq_along(ests[[1L]]), function(i) sapply(ests, "[[", i))
+  names(out) <- names(ests[[1L]])
+  out
+})
+
+# MC means and standard errors
+(summas <- lapply(ests, function(x) apply(x, 1L, function(z){
+  mea <- mean(z)
+  sdo <- sd(z) / sqrt(length(z))
+  c(mean = mea, sd = sdo)
+})))
+
+# likelihood ratio tests
+z <- lapply(out, function(x) anova(x$f2, x$f3, test = "LRT"))
+ps <- sapply(lapply(z, "[", TRUE, "Pr(>Chi)"), "[[", 2L)
+plot(ecdf(ps))
+abline(a = 0, b = 1, lty = 2)
+sum(ps < 0.05)
+quantile(ps, seq(0, 1, .01))
+```
