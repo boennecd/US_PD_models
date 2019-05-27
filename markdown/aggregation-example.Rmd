@@ -54,7 +54,7 @@ knitr::opts_chunk$set(
 # please do set options here that could change...
 knitr::opts_chunk$set(
   echo = TRUE, fig.height = 4, fig.width = 7, dpi = 72, comment = "#R", 
-  error = FALSE)
+  error = FALSE, cache.lazy = FALSE)
 options(digits = 4, scipen = 10, width = 90)
 ```
 
@@ -71,17 +71,19 @@ library(parallel)
 
 ```{r sigma_do_dens, cache = 1}
 local({
-  dat$time_var <- format(make_ym_inv(dat$tstop), "%Y")
+  dat$time_var <- as.integer(format(make_ym_inv(dat$tstop), "%Y"))
   dat$siga <- c(wz(dat$sigma, do_center = FALSE, scale = FALSE))
   
   get_plot_device({
-    ggplot(subset(dat, as.integer(time_var) > 1998L), 
-           aes(x = siga, y = time_var)) + 
-      stat_density_ridges(scale = 3, fill = rgb(0, 0, 0, 0), quantile_lines = TRUE, 
-                          quantiles = 2) + theme_ridges() +
+    ggplot(dat, aes(x = siga, y = time_var, group = time_var)) + 
+      stat_density_ridges(scale = 5, fill = rgb(0, 0, 0, 0), quantile_lines = TRUE, 
+                          quantiles = 2, rel_min_height = 0.01) + 
+      theme_ridges() +
       scale_x_continuous(expand = c(0.01, 0)) +
-      scale_y_discrete(expand = c(0.01, 0)) + 
-      labs(x = get_label("sigma"), y = "Year (t - 1, t]")
+      scale_y_reverse(breaks = seq(max(dat$time_var), min(dat$time_var), 
+                                    by = -5), 
+                       expand = c(0.01, 0)) +
+      labs(y = "Year (t - 1, t]", x = "")
   }, file_name_wo_extension = "agg-sigma-time-dens", ggplot = TRUE)
 })
 ```
@@ -94,8 +96,8 @@ local({
 n_periods <- 64L + 1L
 
 # means for mixture component with time-varying means
-mea_min <- -3
-mea_max <- 2
+mea_min <- -1
+mea_max <- 3
 mid <- (n_periods - 1L) / 2L 
 tfunc <- abs(1:n_periods - mid - 1L)
 tfunc <- (tfunc - min(tfunc)) / (max(tfunc) - min(tfunc)) * 
@@ -112,12 +114,12 @@ get_dat <- function(){
     n <- length(tstart)
     X <- ifelse(
       .2 > runif(n), 
-      rnorm(n * 1L, mean = tfunc[tstart + 1L], sd = .5), 
+      rnorm(n * 1L, mean = tfunc[tstart + 1L]), 
       rnorm(n * 1L))
     
     # determine if individual has an event and remove observations after
     # if so
-    y <- -expm1(-exp(X - 3)) > runif(n) 
+    y <- -expm1(-exp(X - 4)) > runif(n) 
     idx <- if(any(y)) 1:min(which(y)) else 1:n
     
     # return 
@@ -138,15 +140,10 @@ ggplot(tmp, aes(x = X, y = as.factor(tstop))) +
 
 ```{r run_sim, cache = 1}
 ######
-# simulate
-
-# knot positions
-(knt <- seq(1, n_periods, length.out = 5L)[-c(1, 5)])
-
-# simulate and compute
-cl <- makeCluster(6L)
+# simulate and fit models
+cl <- makeCluster(6L) 
 set.seed(28789699)
-clusterExport(cl, c("knt", "n_periods", "n_periods", "get_dat", "tfunc"), 
+clusterExport(cl, c("n_periods", "n_periods", "get_dat", "tfunc"), 
               envir = environment())
 clusterSetRNGStream(cl)
 
@@ -155,7 +152,7 @@ out <- parLapply(cl, 1:1000L, function(...){
   
   # simulate data and fit true model
   sim_dat <- get_dat()
-  f1 <- glm(y ~ X, binomial("cloglog"), sim_dat)
+  f1 <- glm(y ~ X, binomial("cloglog"), sim_dat)["coefficients"]
   
   # aggregate data 
   sim_col <- lapply(split(sim_dat, sim_dat$tstop), function(x){
@@ -169,12 +166,13 @@ out <- parLapply(cl, 1:1000L, function(...){
   f2 <- glm(y ~ X, binomial("cloglog"), sim_col, weights = n)
   
   # add splines
-  f3 <- update(f2, . ~ . + ns(tstop, knots = knt))
+  f3 <- update(f2, . ~ . + poly(tstop, 2))
   
   list(f1 = f1, f2 = f2, f3 = f3)
 }, simplify = FALSE)
 
 stopCluster(cl)
+rm(cl) 
 ```
 
 ```{r gather_res}
