@@ -35,8 +35,8 @@ Hash: 390ed5b5da840cec3e6f5c90c6ab23f7
 
 Package: RcppArmadillo
 Source: CRAN
-Version: 0.9.200.7.0
-Hash: a4530990333b956fdfe41df2ff9b9841
+Version: 0.9.500.2.0
+Hash: 61c9e426870325b32f0853985058945e
 Requires: Rcpp
 
 Package: RcppEigen
@@ -154,10 +154,18 @@ Version: 0.6.19
 Hash: 99a5cdd9144b03b7a2ddbbef862fb07f
 
 Package: dynamichazard
-Source: CRAN
-Version: 0.6.4
-Hash: cdfbcaab6be03e6499791d5d4abc42bf
-Requires: Rcpp, RcppArmadillo, nloptr
+Source: github
+Version: 0.6.6
+Hash: c14c58e89999485c2a3359076a4d6aa3
+Requires: Rcpp, RcppArmadillo
+GithubRepo: dynamichazard
+GithubUsername: boennecd
+GithubRef: master
+GithubSha1: 12df89988427259759397fa1d40cf44d869badc7
+RemoteHost: https://api.github.com
+RemoteRepo: dynamichazard
+RemoteUsername: boennecd
+RemoteSha: 12df89988427259759397fa1d40cf44d869badc7
 
 Package: evaluate
 Source: CRAN
@@ -337,7 +345,7 @@ Requires: Rcpp
 Package: mssm
 Source: github
 Version: 0.1.0
-Hash: db0bf3754ea3e9b5a8ed1f2c4bd1fc01
+Hash: 6eb62732087cc95b49441a29112174b1
 Requires: Rcpp, RcppArmadillo, nloptr, testthat
 GithubRepo: mssm
 GithubUsername: boennecd

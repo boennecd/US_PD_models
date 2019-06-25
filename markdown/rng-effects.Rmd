@@ -191,7 +191,8 @@ n_threads <- 6L
 ctrl_default <- PF_control(
   N_fw_n_bw = 200L, N_smooth = 400L, N_first = 1000L, n_max = 1000, 
   n_threads = n_threads, nu = 8L, covar_fac = 1.2, ftol_rel = 1e-6,
-  smoother = "Fearnhead_O_N", eps = 1e-4, averaging_start = 200L)
+  smoother = "Fearnhead_O_N", eps = 1e-4, averaging_start = 200L, 
+  fix_seed = FALSE)
 ```
 
 ```{r assign_log_n_eval}
@@ -251,7 +252,7 @@ Take more iterations
 ```{r def_take_xtra, cache = 1}
 take_xtra <- function(
   fit, n_max = 1000L, trace = 0L, N_fw_n_bw = 500L, N_smooth = 1000L, 
-  N_first = N_fw_n_bw, N_smooth_final = N_smooth, averaging_start = 200L, 
+  N_first = N_fw_n_bw, N_smooth_final = N_smooth, averaging_start = 100L, 
   eps = 1e-5){
   cl <- fit$call
   ctrl <- fit$control
@@ -655,47 +656,48 @@ Get approximate negative observed information matrix
 --> 
 
 ```{r sd_rng, cache = 1}
-get_approx_info_n_score <- function(fit){
-  # First check variance of estimates
-  ex <- local({
-    set.seed(26217670)
-    ex <- replicate(10, {
-      tmp <- fit
-      rnorm(1)
-      tmp$seed <- .Random.seed
-      o <- PF_get_score_n_hess(tmp, use_O_n_sq = TRUE)
-      o$set_n_particles(N_fw = 1000L, N_first = 5000L)
-      o$get_get_score_n_hess()
-    }, simplify = FALSE)
-    
-    z <- sapply(ex, function(x) sqrt(diag(solve(x$observation$neg_obs_info))))
-    cat("Approximations\n")
-    print(z)
-    cat("Means\n")
-    print(zm <- rowMeans(z))
-    cat("Standard deviations\n")
-    print(apply(z, 1, sd))
-    
-    cat("Comparison with model without random effects\n")
-    print(cbind(rng = zm, `non-rng` = sqrt(diag(vcov(base_fit)))))
-    
-    ex
-  })
-  
-  # then make final run we will use
-  o <- PF_get_score_n_hess(fit, use_O_n_sq = TRUE)
-  o$set_n_particles(N_fw = 5000L, N_first = 10000L)
-  o$get_get_score_n_hess()
+get_approx_info_n_score <- function(fit, n_rep = 100){
+  set.seed(26217670)
+  replicate(n_rep, {
+    rnorm(10000)
+    fit$seed <- .Random.seed
+    o <- PF_get_score_n_hess(fit, use_O_n_sq = FALSE)
+    o$set_n_particles(N_fw = 5000L, N_first = 10000L)
+    o$run_particle_filter()
+    o$get_get_score_n_hess()
+  }, simplify = FALSE)
 }
 
 state_rng_inter_derivs <- get_approx_info_n_score(state_rng_inter_large)
 ```
 
 ```{r show_sd_rng}
-solve(state_rng_inter_derivs$state$neg_obs_info)
-sqrt(diag(solve(state_rng_inter_derivs$state$neg_obs_info)))
+state_rng_inter_derivs_final <- local({
+  # look at score approximations
+  scs <- sapply(state_rng_inter_derivs, "[[", "score")
+  scs <- apply(scs, 1, function(x) cumsum(x) / seq_along(x))
+  matplot(scs, type = "l")
+  cat("Scores:\n")
+  print(scs[nrow(scs), ])
+  
+  obs_info <- lapply(state_rng_inter_derivs, "[[", "obs_info")
+  obs_info <- simplify2array(obs_info)
+  obs_info <- lapply(seq_len(dim(obs_info)[3]), function(i){
+    apply(obs_info[, , 1:i, drop = FALSE], 1:2, mean)
+  })
+  
+  # check standard deviations as we add samples
+  sds <- suppressWarnings(
+    sapply(obs_info, function(x) sqrt(diag(solve(x)))))
+  cat("Standard error estimates:\n")
+  print(sds[, (ncol(sds) - 1):ncol(sds)], digits = 2)
+  matplot(t(sds / sds[, ncol(sds)]), type = "l", col = "black")
+  
+  list(sds = sds, sd = sds[, ncol(sds)], obs_info = obs_info)
+})
 
-sqrt(diag(solve(state_rng_inter_derivs$observation$neg_obs_info)))
+state_rng_inter_derivs_final$sd
+sqrt(diag(vcov(base_fit)))
 ```
 
 </div>
@@ -746,7 +748,7 @@ log_n_eval({
 set.seed(seed)
 log_n_eval({
   state_rng_size_restrict_xtra <- take_xtra(
-    state_rng_size_restrict, trace = 1L)
+    state_rng_size_restrict, trace = 1L, averaging_start = 400L)
 }, "_state_rng_inter_xtra_w_size_one")
 ```
 
@@ -875,19 +877,55 @@ Get approximate negative observed information matrix
                     .Platform$file.sep))
 --> 
 
-```{r sd_w_size_rng, cache = 1}
+```{r sd_w_size_rng, cache = 1, dependson = "sd_rng"}
 state_rng_size_derivs <- 
-  get_approx_info_n_score(state_rng_size_restrict_large)
+  get_approx_info_n_score(state_rng_size_restrict_large, n_rep = 200)
 ```
 
 ```{r show_sd_w_size_rng}
-local({
-  idx <- c(1, 4:8)
-  print(x <- solve(state_rng_size_derivs$state$neg_obs_info[idx, idx]))
-  print(sqrt(diag(x)))
+state_rng_size_derivs_final <- local({
+  # setup matrix to apply restrictions 
+  n_para_full <- length(state_rng_size_derivs[[1]]$score)
+  n_fix <- length(state_rng_size_restrict_large$fixed_effects)
+  K <- matrix(0, n_para_full - 2, n_para_full)
+  diag(K[1:n_fix, 1:n_fix]) <- 1
+  K[n_fix + 1L, n_fix + 1L] <-1
+  diag(K[n_fix + 2:5, n_fix + 4:7]) <- 1
+  rownames(K) <- names(state_rng_size_derivs[[1]]$score)[c(
+    1:n_fix, n_fix + c(1, 4:7))]
+  
+  # look at score approximations
+  scs <- sapply(state_rng_size_derivs, "[[", "score")
+  scs <- K %*% scs
+  scs <- apply(scs, 1, function(x) cumsum(x) / seq_along(x))
+  matplot(scs, type = "l")
+  cat("Scores:\n")
+  print(scs[nrow(scs), ])
+  
+  obs_info <- lapply(state_rng_size_derivs, "[[", "obs_info")
+  obs_info <- lapply(obs_info, function(x) tcrossprod(K %*% x, K))
+  obs_info <- simplify2array(obs_info)
+  
+  obs_info <- lapply(seq_len(dim(obs_info)[3]), function(i){
+    apply(obs_info[, , 1:i, drop = FALSE], 1:2, mean)
+  })
+  
+  # check standard deviations as we add samples
+  sds <- suppressWarnings(
+    sapply(obs_info, function(x) sqrt(diag(solve(x)))))
+  print(sds[, (ncol(sds) - 20L):ncol(sds)], digits = 8)
+  print(sds[, (ncol(sds) - 20L):ncol(sds)] / sds[, ncol(sds)], digits = 2)
+  matplot(t(sds / sds[, ncol(sds)]), type = "l", col = "black", 
+          ylim = c(0, 2))
+  sdsx <- head(sds, -3)
+  matplot(t(sdsx / sdsx[, ncol(sdsx)]), type = "l", col = "black", 
+          ylim = c(0, 2))
+  
+  list(sds = sds, sd = sds[, ncol(sds)], obs_info = obs_info)
 })
 
-sqrt(diag(solve(state_rng_size_derivs$observation$neg_obs_info)))
+state_rng_size_derivs_final$sd
+sqrt(diag(vcov(base_fit)))
 ```
 
 </div>
@@ -1029,9 +1067,10 @@ local({
   labs <- attr(state_rng_inter_large$terms$fixed, "term.labels")
   labs <- c("(Intercept)", labs)
   
+  . <- function(x)
+    solve(x$obs_info[[length(x$obs_info)]])
   vcovs <- list(
-    solve(state_rng_inter_derivs$observation$neg_obs_info),
-    solve(state_rng_size_derivs$observation$neg_obs_info))
+    .(state_rng_inter_derivs_final), .(state_rng_size_derivs_final))
   
   # re-order terms
   assg <- 
