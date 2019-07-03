@@ -33,7 +33,7 @@ add_hist <- function(x, breaks = 100){
   y_max <- par("usr")[4]
   y_max <- y_max - .04 * (y_max - y_min)
   # substract w/ zero to make it clear that the lowest value is zero
-  y <- (y - 0) / (max(y) - 0) * (y_max - y_min) + y_min 
+  y <- (y - 0) / (max(y) - 0) * (y_max - y_min) / 5 + y_min 
   rect(h$breaks[-nB], y_min, h$breaks[-1L], y, border =  par("fg"), 
        angle = 45, col = rgb(0, 0, 0, .1))
 }
