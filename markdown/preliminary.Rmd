@@ -231,7 +231,7 @@ local({
       for(i in 0:3)
         vis.gam(fit, c("rel_size", "actq_defl_log"), theta= 20 + 90 * i, 
                 ticktype = "detailed", color = "gray", 
-                zlab = "\nLog hazard", 
+                zlab = "\nLog-hazard", 
                 xlab = paste0("\n", get_label("rel_size")), 
                 ylab = paste0("\n", get_label("actq_defl_log")))
       
@@ -275,7 +275,7 @@ local({
           persp(
             x = unique(rel_size), y = unique(actq_defl_log), z = z_vals, 
             ticktype = "detailed", theta= 20 + 90 * i, col = cols, 
-            zlab = "\nLog hazard", 
+            zlab = "\nLog-hazard", 
             xlab = paste0("\n", get_label("rel_size")), 
             ylab = paste0("\n", get_label("actq_defl_log")))
         })
@@ -342,6 +342,92 @@ local({
 library(car)
 vif(f0)
 ```
+
+## Distance-to-Default
+
+First we compare the difference between including the Distance-to-Default 
+on the log-hazard scale (complementary log-log) and then we consider using 
+the corresponding probabilities from the Merton model as in @Bharath08 on 
+the log-hazard scale. 
+
+<div class="hideable">
+
+```{r comp_scales}
+get_plot_device({
+  ps <- pnorm(seq(-7, 0, length.out = 1000))
+  DtD <- -qnorm(ps)
+  cll <- function(p)
+    log(-log1p(-p))
+  x <- cll(ps)
+  
+  # DtD vs. cloglog
+  par(mar = c(4, 5, 1, 1))
+  plot(x, DtD, type = "l", 
+       xlab = expression(log(-log(1 - p))), 
+       ylab = expression(textstyle(DtD) == {Phi^-1}(1 - p)), 
+       ylim = rev(range(DtD)))
+  # add qqline
+  qqline. <- function(ph1, ph2, f1, f2){
+    p1 <- c(f1(ph1), f2(ph1))
+    p2 <- c(f1(ph2), f2(ph2))
+    b <- (p2[2] - p1[2]) / (p2[1] - p1[1])
+    a <- p1[2] - b * p1[1]
+    abline(a = a, b = b, lty = 2)
+  }
+  qqline.(.00001, .04, cll, function(p) qnorm(1 - p))
+  
+  # transformed
+  par(mar = c(4, 5, 1, 1))
+  plot(x, ps, type = "l", yaxt = "n",
+       xlab = expression(log(-log(1 - p))), 
+       ylab = expression(p == Phi(-textstyle(DtD))~(textstyle(DtD)~textstyle(shown))))
+  qqline.(.00001, .04, cll, identity)
+  yat <- seq(0, 7, by = .5)
+  axis(2, at = pnorm(1 - yat), labels = yat)
+}, "comp-dtd-and-ps-vs-cloglog", onefile = FALSE, set_par = FALSE)
+```
+
+</div>
+
+Next, we consider the remark 
+
+> Unreported models that use either the log of market equity or the log of 
+> the Merton DD distance to default, rather than the Merton DD probability, 
+> perform uniformly worse than the resu
+
+from @Bharath08. I do not get how they can use the log of the Merton 
+distance-to-default when it has negativ values [@Bharath08, tabel 1]. Thus, we compare
+using the distance to default on the log-hazard scale as in @Duffie07 
+versus using the Merton DD probability.
+
+<div class="hideable">
+
+```{r dtd_check, cache = 1}
+local({
+  # compute the Merton DtD probability
+  dat$dtd_prob <- pnorm(-wz(dat$dtd, do_scale = FALSE, do_center = FALSE))
+  hist(dat$dtd_prob)
+  
+  # univariate model
+  f_dtd      <- glm(y ~ wz(dtd) , binomial("cloglog"), dat)
+  f_prob_dtd <- glm(y ~ dtd_prob, binomial("cloglog"), dat)
+  print(AIC(f_dtd, f_prob_dtd))
+  
+  # model as in Duffie et al. (2007)
+  base_f <- glm(
+    y ~ wz(excess_ret) + r1y + log_market_ret, binomial("cloglog"), dat)
+  f_dtd      <- update(base_f, . ~ . + wz(dtd))
+  f_prob_dtd <- update(base_f, . ~ . + dtd_prob)
+  print(AIC(f_dtd, f_prob_dtd))
+  
+  # what if we add the probability to the latter model
+  f_dtd_w_prob <- update(f_dtd, . ~ . + dtd_prob)
+  print(summary(f_dtd_w_prob))
+  anova(f_dtd, f_dtd_w_prob, test = "Chisq")
+})
+```
+
+</div>
 
 ## Residual diagnostics
 
@@ -695,7 +781,7 @@ for(i in seq_along(vars)){
 
 ## In-sample fit
 
-Fit model from  @Duffie09 without the random effect
+Fit model from  @Duffie09 without the random effect (i.e., like @Duffie07)
 
 <div class="hideable">
 

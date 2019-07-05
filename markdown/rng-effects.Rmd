@@ -762,8 +762,8 @@ log_n_eval({
 
 ```{r large_w_size_state_rng, cache = 1, dependson = "xtra_w_size_state_rng"}
 state_rng_size_restrict_large <- take_xtra(
-  state_rng_size_restrict_xtra, n_max = 1L, N_fw_n_bw = 10000L, 
-  N_smooth = 50000L, N_first = 10000L, N_smooth_final = 2000L)
+  state_rng_size_restrict_xtra, n_max = 1L, N_fw_n_bw = 25000L, 
+  N_smooth = 100000L, N_first = 100000L, N_smooth_final = 2000L)
 ```
 
 </div>
@@ -926,6 +926,44 @@ state_rng_size_derivs_final <- local({
 
 state_rng_size_derivs_final$sd
 sqrt(diag(vcov(base_fit)))
+```
+
+</div>
+
+Look at correlation in random effect term on linear predictor scale 
+
+<div class="hideable"> 
+
+```{r check_cov}
+local({
+  rel_size_var <- wz(dat$rel_size)
+  Sigma <- state_rng_size_restrict_large$Q
+  n <- 201
+  cat("Range\n")
+  print(rel_size_range <- range(rel_size_var))
+  
+  x <- seq(from = rel_size_range[1],to = rel_size_range[2], length = n)
+  X <- split(rbind(1, x), rep(1:n, each = 2))
+  . <- function(z1, z2)
+      z1 %*% Sigma %*% z2 /sqrt(z1 %*% Sigma %*% z1 * z2 %*% Sigma %*% z2)
+  corrs <- outer(X, X, function(x, y)
+    vapply(seq_along(x), function(i) .(x[[i]], y[[i]]), numeric(1)))
+  
+  get_plot_device({
+    lab <- "Relative log market size"
+    contour(x, x, corrs, xlab = lab, ylab = lab)
+    contour(x, x, corrs, levels = c(
+      seq(-.4, .6, by = .2), seq(.7, .9, by = .1), seq(.92, .98, by = .02)), 
+      xlab = lab, ylab = lab)
+    
+    x.mock <- x
+    keep <- as.integer(seq(1, length(x), length.out = 10L)) 
+    x.mock[keep] <- round(x[keep], 2)
+    x.mock[-keep] <- NA
+    heatmap(corrs, Rowv = NA,Colv = NA, scale = 'none', labRow = x.mock,
+            labCol = x.mock, symm = T, xlab = lab, ylab = lab)
+  }, "rng-lp-cor", onefile = FALSE)
+})
 ```
 
 </div>
