@@ -863,6 +863,39 @@ local({
 })
 ```
 
+Plot the mean estimate of the random effect term
+
+```{r show_mean_rng_est}
+local({
+  fit <- state_rng_size_restrict_large
+  rel_size_var <- wz(dat$rel_size)
+  Sigma <- fit$Q
+  cat("Range\n")
+  print(rel_size_range <- range(rel_size_var))
+  
+  meas <- get_cloud_means(fit)
+  fixef <- fit$fixed_effects["wz(rel_size)"]
+  
+  x <- seq(rel_size_range[1], rel_size_range[2], length.out = 50)
+  xi <- x + attr(rel_size_var, "mu")
+  y <- seq_len(nrow(meas))
+  yi <- make_ym_inv(unique(sort(dat$tstop)))
+  yi <- as.integer(format(yi, "%Y")) + (as.integer(format(yi, "%m")) - 1L) / 12L
+  stopifnot(length(yi) == length(y))
+  xy <- expand.grid(rel_size = x, t = y)
+  z <- sapply(split(xy, xy$t), function(xyi)
+    meas[xyi$t[1], 1] + (meas[xyi$t[1], 2] + fixef)  * xyi$rel_size)
+  
+  n_plots <- 9L
+  get_plot_device({
+    for(i in 0:(n_plots - 1L))
+      persp(xi, yi, z, ticktype = "detailed", theta = -45 + 360 * i / n_plots, 
+            xlab = "\nLog relative market size", ylab = "\nYear", 
+            zlab = "\nLog-hazard") 
+  }, "rng-pred-mean", onefile = FALSE)
+})
+```
+
 </div>
 
 Get approximate negative observed information matrix
